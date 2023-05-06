@@ -1,25 +1,37 @@
 mod parse;
+mod prepare;
+// mod run;
 
 use rustpython_parser::ast::Constant;
 
 use crate::parse::parse_code;
+use crate::prepare::prepare;
 
 fn main() {
     let code = "if a and b:\n x = '1'\n";
     let nodes = parse_code(code, None).unwrap();
+    dbg!(&nodes);
+    let nodes = prepare(nodes).unwrap();
     dbg!(nodes);
+}
+
+impl Default for Value {
+    fn default() -> Self {
+        Self::Undefined
+    }
 }
 
 #[derive(Debug, Clone)]
 enum Value {
+    Undefined,
+    None,
+    True,
+    False,
     Int(i64),
     Float(f64),
     Str(String),
     List(Vec<Value>),
     Range(i64),
-    True,
-    False,
-    None,
 }
 
 #[derive(Clone, Debug)]
@@ -42,40 +54,39 @@ enum Operator {
 }
 
 #[derive(Debug, Clone)]
-enum Expr {
-    Assign {
-        target: String,
-        value: Box<Expr>,
-    },
+enum Expr<T, Funcs> {
     Constant(Constant),
-    Name(String),
+    Name(T),
     Call {
-        func: String,
-        args: Vec<Expr>,
-        kwargs: Vec<(String, Expr)>,
+        func: Funcs,
+        args: Vec<Expr<T, Funcs>>,
+        // kwargs: Vec<(T, Expr<T, Funcs>)>,
     },
     Op {
-        left: Box<Expr>,
+        left: Box<Expr<T, Funcs>>,
         op: Operator,
-        right: Box<Expr>,
+        right: Box<Expr<T, Funcs>>,
     },
-    List(Vec<Expr>),
+    List(Vec<Expr<T, Funcs>>),
 }
 
 #[derive(Debug, Clone)]
-enum Node {
+enum Node<Vars, Funcs> {
     Pass,
-    Expression(Expr),
+    Expr(Expr<Vars, Funcs>),
+    Assign {
+        target: Vars,
+        value: Box<Expr<Vars, Funcs>>,
+    },
     For {
-        target: Expr,
-        iter: Expr,
-        body: Vec<Node>,
-        or_else: Vec<Node>,
+        target: Expr<Vars, Funcs>,
+        iter: Expr<Vars, Funcs>,
+        body: Vec<Node<Vars, Funcs>>,
+        or_else: Vec<Node<Vars, Funcs>>,
     },
     If {
-        test: Expr,
-        body: Vec<Node>,
-        or_else: Vec<Node>,
+        test: Expr<Vars, Funcs>,
+        body: Vec<Node<Vars, Funcs>>,
+        or_else: Vec<Node<Vars, Funcs>>,
     },
 }
-

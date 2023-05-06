@@ -1,0 +1,119 @@
+use ahash::AHashMap;
+use std::borrow::Cow;
+
+use crate::{Expr, Node};
+
+type PrepareResult<T> = Result<T, Cow<'static, str>>;
+
+/// TODO:
+/// * pre-calculate const expressions
+/// * const assignment as new type?
+pub(crate) fn prepare(nodes: Vec<Node<String, String>>) -> PrepareResult<(usize, Vec<Node<usize, Builtin>>)> {
+    let mut namespace = Namespace::new(nodes.len());
+    let new_nodes = prepare_nodes(nodes, &mut namespace)?;
+    Ok((namespace.names_count, new_nodes))
+}
+
+fn prepare_nodes(
+    nodes: Vec<Node<String, String>>,
+    namespace: &mut Namespace,
+) -> PrepareResult<Vec<Node<usize, Builtin>>> {
+    let mut new_nodes = Vec::with_capacity(nodes.len());
+    for node in nodes {
+        match node {
+            Node::Pass => (),
+            Node::Expr(expr) => {
+                let expr = prepare_expression(expr, namespace)?;
+                new_nodes.push(Node::Expr(expr));
+            }
+            Node::Assign{target, value} => {
+                let target = namespace.get_id(target);
+                let value = Box::new(prepare_expression(*value, namespace)?);
+                new_nodes.push(Node::Assign { target, value });
+            }
+            Node::For {
+                target,
+                iter,
+                body,
+                or_else,
+            } => new_nodes.push(Node::For {
+                target: prepare_expression(target, namespace)?,
+                iter: prepare_expression(iter, namespace)?,
+                body: prepare_nodes(body, namespace)?,
+                or_else: prepare_nodes(or_else, namespace)?,
+            }),
+            Node::If { test, body, or_else } => new_nodes.push(Node::If {
+                test: prepare_expression(test, namespace)?,
+                body: prepare_nodes(body, namespace)?,
+                or_else: prepare_nodes(or_else, namespace)?,
+            }),
+        }
+    }
+    Ok(new_nodes)
+}
+
+fn prepare_expression(expr: Expr<String, String>, namespace: &mut Namespace) -> PrepareResult<Expr<usize, Builtin>> {
+    match expr {
+        Expr::Constant(value) => Ok(Expr::Constant(value)),
+        Expr::Name(name) => Ok(Expr::Name(namespace.get_id(name))),
+        Expr::Op { left, op, right } => Ok(Expr::Op {
+            left: Box::new(prepare_expression(*left, namespace)?),
+            op,
+            right: Box::new(prepare_expression(*right, namespace)?),
+        }),
+        Expr::Call { func, args } => {
+            let func = Builtin::find(&func)?;
+            Ok(Expr::Call {
+                func,
+                args: args
+                    .into_iter()
+                    .map(|e| prepare_expression(e, namespace))
+                    .collect::<PrepareResult<Vec<_>>>()?,
+            })
+        }
+        Expr::List(elements) => {
+            let expressions = elements
+                .into_iter()
+                .map(|e| prepare_expression(e, namespace))
+                .collect::<PrepareResult<Vec<_>>>()?;
+            Ok(Expr::List(expressions))
+        }
+    }
+}
+
+struct Namespace {
+    name_map: AHashMap<String, usize>,
+    names_count: usize,
+}
+
+impl Namespace {
+    fn new(capacity: usize) -> Self {
+        Self {
+            name_map: AHashMap::with_capacity(capacity),
+            names_count: 0,
+        }
+    }
+
+    fn get_id(&mut self, name: String) -> usize {
+        *self.name_map.entry(name).or_insert_with(|| {
+            let name = self.names_count;
+            self.names_count += 1;
+            name
+        })
+    }
+}
+
+// this is a temporary hack
+#[derive(Debug, Clone)]
+pub enum Builtin {
+    Print,
+}
+
+impl Builtin {
+    fn find(name: &str) -> PrepareResult<Self> {
+        match name {
+            "print" => Ok(Builtin::Print),
+            _ => Err(format!("unknown function: {}", name).into()),
+        }
+    }
+}
