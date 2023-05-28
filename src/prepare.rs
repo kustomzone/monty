@@ -47,24 +47,21 @@ impl Prepare {
                     new_nodes.push(Node::Expr(expr));
                 }
                 Node::Assign { target, object } => {
-                    let expr_loc = self.prepare_expression(*object)?;
+                    let object = self.prepare_expression(object)?;
                     let (target, is_new) = self.get_id(target);
                     let target_id = target.id;
-                    if is_new && expr_loc.expr.is_const() {
-                        self.namespace[target_id] = expr_loc.expr.into_object();
+                    if is_new && object.expr.is_const() {
+                        self.namespace[target_id] = object.expr.into_object();
                         self.consts[target_id] = true;
                     } else {
-                        new_nodes.push(Node::Assign {
-                            target,
-                            object: Box::new(expr_loc),
-                        });
+                        new_nodes.push(Node::Assign { target, object });
                         self.consts[target_id] = false;
                     }
                 }
                 Node::OpAssign { target, op, object } => {
                     let target = self.get_id(target).0;
                     self.consts[target.id] = false;
-                    let object = Box::new(self.prepare_expression(*object)?);
+                    let object = self.prepare_expression(object)?;
                     new_nodes.push(Node::OpAssign { target, op, object });
                 }
                 Node::For {

@@ -56,7 +56,7 @@ fn parse_statement(statement: Stmt) -> ParseResult<Node> {
         StmtKind::AugAssign { target, op, value } => Ok(Node::OpAssign {
             target: Identifier::from_ast(*target)?,
             op: convert_op(op),
-            object: Box::new(parse_expression(*value)?),
+            object: parse_expression(*value)?,
         }),
         StmtKind::AnnAssign { target, value, .. } => match value {
             Some(value) => parse_assignment(*target, *value),
@@ -140,9 +140,10 @@ fn parse_statement(statement: Stmt) -> ParseResult<Node> {
 
 /// `lhs = rhs` -> `lhs, rhs`
 fn parse_assignment(lhs: AstExpr, rhs: AstExpr) -> ParseResult<Node> {
-    let target = Identifier::from_ast(lhs)?;
-    let value = Box::new(parse_expression(rhs)?);
-    Ok(Node::Assign { target, object: value })
+    Ok(Node::Assign {
+        target: Identifier::from_ast(lhs)?,
+        object: parse_expression(rhs)?,
+    })
 }
 
 fn parse_expression(expression: AstExpr) -> ParseResult<ExprLoc> {

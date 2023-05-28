@@ -152,12 +152,12 @@ pub(crate) enum Node {
     Expr(ExprLoc),
     Assign {
         target: Identifier,
-        object: Box<ExprLoc>, // TODO remove box
+        object: ExprLoc,
     },
     OpAssign {
         target: Identifier,
         op: Operator,
-        object: Box<ExprLoc>, // TODO remove box
+        object: ExprLoc,
     },
     For {
         target: ExprLoc,
