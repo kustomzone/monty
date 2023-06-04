@@ -9,7 +9,7 @@ use monty::{Executor, Exit, Object};
 use pyo3::prelude::*;
 
 #[bench]
-fn add_two(bench: &mut Bencher) {
+fn add_two_monty(bench: &mut Bencher) {
     let ex = Executor::new("1 + 2", "test.py", &[]).unwrap();
     let v = ex.run(vec![]).unwrap();
     match v {
@@ -64,7 +64,7 @@ len(v)
 ";
 
 #[bench]
-fn loop_mod_13(bench: &mut Bencher) {
+fn loop_mod_13_monty(bench: &mut Bencher) {
     let ex = Executor::new(LOOP_MOD_13_CODE, "test.py", &[]).unwrap();
     let v = ex.run(vec![]).unwrap();
     match v {
@@ -111,7 +111,7 @@ fn loop_mod_13_cpython(bench: &mut Bencher) {
 }
 
 #[bench]
-fn end_to_end(bench: &mut Bencher) {
+fn end_to_end_monty(bench: &mut Bencher) {
     bench.iter(|| {
         let ex = Executor::new(black_box("1 + 2"), "test.py", &[]).unwrap();
         black_box(ex.run(vec![]).unwrap());

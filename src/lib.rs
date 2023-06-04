@@ -7,6 +7,9 @@ mod prepare;
 mod run;
 mod types;
 
+#[global_allocator]
+static GLOBAL: mimalloc::MiMalloc = mimalloc::MiMalloc;
+
 use crate::exceptions::{InternalRunError, RunError};
 pub use crate::object::Object;
 use crate::parse::parse;
