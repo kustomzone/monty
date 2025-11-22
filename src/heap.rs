@@ -24,6 +24,24 @@ impl HeapData {
             Self::Tuple(_) => "tuple",
         }
     }
+
+    /// different name to avoid confusion with `PartialEq::eq`
+    #[must_use]
+    pub fn py_eq(&self, other: &Self, heap: &Heap) -> bool {
+        match (self, other) {
+            (Self::Str(s1), Self::Str(s2)) => s1 == s2,
+            (Self::Bytes(b1), Self::Bytes(b2)) => b1 == b2,
+            (Self::List(elements1), Self::List(elements2)) => {
+                elements1.len() == elements2.len()
+                    && elements1.iter().zip(elements2).all(|(i1, i2)| (i1.py_eq(i2, heap)))
+            }
+            (Self::Tuple(elements1), Self::Tuple(elements2)) => {
+                elements1.len() == elements2.len()
+                    && elements1.iter().zip(elements2).all(|(i1, i2)| (i1.py_eq(i2, heap)))
+            }
+            _ => false,
+        }
+    }
 }
 
 /// A single entry inside the heap arena, storing refcount and payload.

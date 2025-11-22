@@ -176,7 +176,7 @@ impl Object {
 
     /// different name to avoid confusion with `PartialEq::eq`
     #[must_use]
-    pub fn py_eq(&self, other: &Self) -> bool {
+    pub fn py_eq(&self, other: &Self, heap: &Heap) -> bool {
         match (self, other) {
             (Self::Undefined, _) => false,
             (_, Self::Undefined) => false,
@@ -189,6 +189,7 @@ impl Object {
             (Self::False, Self::Int(v2)) => 0 == *v2,
             (Self::Int(v1), Self::False) => *v1 == 0,
             (Self::None, Self::None) => true,
+            (Self::Ref(id1), Self::Ref(id2)) => (*id1 == *id2) || heap.get(*id1).py_eq(heap.get(*id2), heap),
             _ => false,
         }
     }
@@ -476,19 +477,6 @@ impl Object {
             Self::Exc(exc) => format!("{exc}").into(),
             Self::Ref(id) => format!("<Ref({id})>").into(),
         }
-    }
-}
-
-fn vecs_equal(v1: &[Object], v2: &[Object]) -> bool {
-    if v1.len() == v2.len() {
-        for (v1, v2) in v1.iter().zip(v2.iter()) {
-            if !v1.py_eq(v2) {
-                return false;
-            }
-        }
-        true
-    } else {
-        false
     }
 }
 

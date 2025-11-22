@@ -80,6 +80,12 @@ a = [1, 2, 3]
 str(a)
 ", "str: '[1, 2, 3]'";
 ints_equal: "(1 == 1, 1 == 2)", "tuple: (True, False)";
+str_equal: "('aa' == 'aa', 'aa' == 'bb')", "tuple: (True, False)";
+str_equal2: "('aa' == 'aa', 'aa' == 'aaa')", "tuple: (True, False)";
+bytes_equal: "(b'aa' == b'aa', b'aa' == b'bb')", "tuple: (True, False)";
+bytes_equal2: "(b'aa' == b'aa', b'aa' == b'aaa')", "tuple: (True, False)";
+list_equal: "([1, 2] == [1, 2], [1] == [1, 2])", "tuple: (True, False)";
+tuple_equal: "((1, 2) == (1, 2), (1, 2) == (2, 1))", "tuple: (True, False)";
 }
 
 macro_rules! execute_raise_tests {

@@ -118,8 +118,8 @@ fn cmp_op<'c, 'd>(
     let left_cow: Cow<Object> = Cow::Owned(left_object);
     let right_cow: Cow<Object> = Cow::Borrowed(&right_object);
     match op {
-        CmpOperator::Eq => Ok(left_cow.as_ref().py_eq(&right_object)),
-        CmpOperator::NotEq => Ok(!left_cow.as_ref().py_eq(&right_object)),
+        CmpOperator::Eq => Ok(left_cow.as_ref().py_eq(&right_object, heap)),
+        CmpOperator::NotEq => Ok(!left_cow.as_ref().py_eq(&right_object, heap)),
         CmpOperator::Gt => Ok(left_cow.gt(&right_cow)),
         CmpOperator::GtE => Ok(left_cow.ge(&right_cow)),
         CmpOperator::Lt => Ok(left_cow.lt(&right_cow)),
