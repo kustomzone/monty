@@ -57,9 +57,9 @@ impl Types {
             Self::BuiltinFunction(FunctionTypes::Print) => {
                 for (i, object) in args.iter().enumerate() {
                     if i == 0 {
-                        print!("{object}");
+                        print!("{}", object.str(heap));
                     } else {
-                        print!(" {object}");
+                        print!(" {}", object.str(heap));
                     }
                 }
                 println!();
@@ -72,7 +72,7 @@ impl Types {
                 let object = &args[0];
                 match object.len(heap) {
                     Some(len) => Ok(Object::Int(len as i64)),
-                    None => exc_err_fmt!(ExcType::TypeError; "Object of type {} has no len()", object),
+                    None => exc_err_fmt!(ExcType::TypeError; "Object of type {} has no len()", object.repr(heap)),
                 }
             }
             Self::BuiltinFunction(FunctionTypes::Str) => {

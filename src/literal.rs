@@ -29,41 +29,31 @@ impl Literal {
     ///
     /// Heap-allocated types (Str, Bytes, Tuple) will be allocated on the heap and
     /// returned as `Object::Ref` variants. Immediate values are returned inline.
-    pub fn into_object(self, heap: &mut Heap) -> Object {
+    pub fn to_object(&self, heap: &mut Heap) -> Object {
         match self {
             Self::Undefined => Object::Undefined,
             Self::Ellipsis => Object::Ellipsis,
             Self::None => Object::None,
             Self::Bool(true) => Object::True,
             Self::Bool(false) => Object::False,
-            Self::Int(v) => Object::Int(v),
-            Self::Float(v) => Object::Float(v),
+            Self::Int(v) => Object::Int(*v),
+            Self::Float(v) => Object::Float(*v),
             Self::Str(s) => {
-                let id = heap.allocate(HeapData::Str(s));
+                let id = heap.allocate(HeapData::Str(s.clone()));
                 Object::Ref(id)
             }
             Self::Bytes(b) => {
-                let id = heap.allocate(HeapData::Bytes(b));
+                let id = heap.allocate(HeapData::Bytes(b.clone()));
                 Object::Ref(id)
             }
             Self::Tuple(items) => {
                 // Convert all tuple items to runtime objects
-                let converted: Vec<Object> = items.into_iter().map(|lit| lit.into_object(heap)).collect();
+                let converted: Vec<Object> = items.iter().map(|lit| lit.to_object(heap)).collect();
                 // Allocate tuple on heap
                 let id = heap.allocate(HeapData::Tuple(converted));
                 Object::Ref(id)
             }
         }
-    }
-
-    /// Clones the literal into a runtime object without consuming the source.
-    ///
-    /// Useful when the parser/prepare code needs to inspect a literal multiple
-    /// times but still hand an owned `Object` to downstream consumers.
-    ///
-    /// Heap-allocated types will be allocated on the heap with refcount=1.
-    pub fn to_object(&self, heap: &mut Heap) -> Object {
-        self.clone().into_object(heap)
     }
 
     /// Returns a Python-esque string representation for logging/debugging.

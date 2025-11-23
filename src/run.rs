@@ -2,7 +2,7 @@ use crate::evaluate::{evaluate_bool, evaluate_discard, evaluate_use};
 use crate::exceptions::{
     exc_err_static, exc_fmt, internal_err, ExcType, InternalRunError, RunError, SimpleException, StackFrame,
 };
-use crate::expressions::{Exit, ExprLoc, Identifier, Node};
+use crate::expressions::{ExprLoc, FrameExit, Identifier, Node};
 use crate::heap::Heap;
 use crate::object::Object;
 use crate::operators::Operator;
@@ -26,16 +26,16 @@ impl<'c> RunFrame<'c> {
         }
     }
 
-    pub fn execute(&mut self, heap: &mut Heap, nodes: &[Node<'c>]) -> RunResult<'c, Exit<'c>> {
+    pub fn execute(&mut self, heap: &mut Heap, nodes: &[Node<'c>]) -> RunResult<'c, FrameExit<'c>> {
         for node in nodes {
             if let Some(leave) = self.execute_node(heap, node)? {
                 return Ok(leave);
             }
         }
-        Ok(Exit::ReturnNone)
+        Ok(FrameExit::Return(Object::None))
     }
 
-    fn execute_node(&mut self, heap: &mut Heap, node: &Node<'c>) -> RunResult<'c, Option<Exit<'c>>> {
+    fn execute_node(&mut self, heap: &mut Heap, node: &Node<'c>) -> RunResult<'c, Option<FrameExit<'c>>> {
         match node {
             Node::Pass => return internal_err!(InternalRunError::Error; "Unexpected `pass` in execution"),
             Node::Expr(expr) => {
@@ -44,8 +44,8 @@ impl<'c> RunFrame<'c> {
                     return Err(e);
                 }
             }
-            Node::Return(expr) => return Ok(Some(Exit::Return(self.execute_expr(heap, expr)?))),
-            Node::ReturnNone => return Ok(Some(Exit::ReturnNone)),
+            Node::Return(expr) => return Ok(Some(FrameExit::Return(self.execute_expr(heap, expr)?))),
+            Node::ReturnNone => return Ok(Some(FrameExit::Return(Object::None))),
             Node::Raise(exc) => self.raise(heap, exc.as_ref())?,
             Node::Assign { target, object } => {
                 self.assign(heap, target, object)?;
@@ -120,8 +120,8 @@ impl<'c> RunFrame<'c> {
                 _ => return internal_err!(InternalRunError::TodoError; "Assign operator {op:?} not yet implemented"),
             };
             if let Err(right) = r {
-                let target_type = target_object.to_string();
-                let right_type = right.to_string();
+                let target_type = target_object.repr(heap);
+                let right_type = right.repr(heap);
                 let e = exc_fmt!(ExcType::TypeError; "unsupported operand type(s) for {op}: '{target_type}' and '{right_type}'");
                 Err(e.with_frame(self.stack_frame(&expr.position)).into())
             } else {

@@ -1,7 +1,6 @@
 use std::fmt;
 
 use crate::exceptions::ExceptionRaise;
-
 use crate::literal::Literal;
 use crate::object::{Attr, Object};
 use crate::object_types::Types;
@@ -201,19 +200,9 @@ pub(crate) enum Node<'c> {
 }
 
 #[derive(Debug)]
-pub enum Exit<'c> {
-    ReturnNone,
+pub enum FrameExit<'c> {
     Return(Object),
     // Yield(Object),
+    #[allow(dead_code)]
     Raise(ExceptionRaise<'c>),
-}
-
-impl fmt::Display for Exit<'_> {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        match self {
-            Self::ReturnNone => write!(f, "None"),
-            Self::Return(v) => write!(f, "{v}"),
-            Self::Raise(exc) => write!(f, "{exc}"),
-        }
-    }
 }

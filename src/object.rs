@@ -34,12 +34,6 @@ pub enum Object {
     Ref(ObjectId),
 }
 
-impl fmt::Display for Object {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        write!(f, "{}", self.cow_str())
-    }
-}
-
 impl PartialOrd for Object {
     fn partial_cmp(&self, other: &Self) -> Option<Ordering> {
         match (self, other) {

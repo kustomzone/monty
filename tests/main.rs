@@ -1,9 +1,4 @@
-use monty::{Executor, Exit, Object};
-
-/// Formats an Object for debug output, following heap references to show actual values
-fn format_object_debug(obj: &Object, heap: &monty::Heap) -> String {
-    format!("{}: {}", obj.type_str(heap), obj.repr(heap))
-}
+use monty::{Executor, Exit};
 
 macro_rules! parse_error_tests {
     ($($name:ident: $code:literal, $expected:literal;)*) => {
@@ -31,13 +26,10 @@ macro_rules! execute_ok_tests {
             paste::item! {
                 #[test]
                 fn [< execute_ok_ $name >]() {
-                    let ex = Executor::new($code, "test.py", &[]).unwrap();
+                    let mut ex = Executor::new($code, "test.py", &[]).unwrap();
                     let result = ex.run(vec![]);
                     let output = match result {
-                        Ok(Exit::Return(value)) => {
-                            let heap = ex.heap();
-                            format_object_debug(&value, &heap)
-                        }
+                        Ok(Exit::Return(obj)) => format!("{}: {}", obj.type_str(), obj.repr()),
                         otherwise => panic!("Unexpected exit: {:?}", otherwise),
                     };
                     let expected = $expected.trim_matches('\n');
@@ -99,7 +91,7 @@ macro_rules! execute_raise_tests {
             paste::item! {
                 #[test]
                 fn [< execute_raise_ $name >]() {
-                    let ex = Executor::new($code, "test.py", &[]).unwrap();
+                    let mut ex = Executor::new($code, "test.py", &[]).unwrap();
                     let result = ex.run(vec![]);
                     let output = match result {
                         Ok(Exit::Raise(exc_raise)) => {

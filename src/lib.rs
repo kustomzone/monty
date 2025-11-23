@@ -1,5 +1,6 @@
 mod evaluate;
 mod exceptions;
+mod exit;
 mod expressions;
 mod heap;
 mod literal;
@@ -15,19 +16,16 @@ mod run;
 static GLOBAL: mimalloc::MiMalloc = mimalloc::MiMalloc;
 
 use crate::exceptions::{InternalRunError, RunError};
-pub use crate::expressions::Exit;
+pub use crate::exit::{Exit, ReturnObject};
 use crate::expressions::Node;
+use crate::heap::{Heap, HeapData};
 use crate::literal::Literal;
-pub use crate::object::Object;
+use crate::object::Object;
 use crate::parse::parse;
+// TODO should these really be public?
 pub use crate::parse_error::{ParseError, ParseResult};
 use crate::prepare::prepare;
 use crate::run::RunFrame;
-use std::cell::Ref;
-use std::cell::RefCell;
-
-// Re-export heap types for testing and debugging
-pub use crate::heap::{Heap, HeapData};
 
 /// Main executor that compiles and runs Python code.
 ///
@@ -38,7 +36,7 @@ pub use crate::heap::{Heap, HeapData};
 pub struct Executor<'c> {
     initial_namespace: Vec<Literal>,
     nodes: Vec<Node<'c>>,
-    heap: RefCell<Heap>,
+    heap: Heap,
 }
 
 impl<'c> Executor<'c> {
@@ -50,16 +48,8 @@ impl<'c> Executor<'c> {
         Ok(Self {
             initial_namespace,
             nodes,
-            heap: RefCell::new(Heap::default()),
+            heap: Heap::default(),
         })
-    }
-
-    /// Returns a reference to the heap for accessing heap-allocated objects.
-    ///
-    /// This is primarily useful for testing and debugging, where you need to
-    /// format or inspect objects after execution has completed.
-    pub fn heap(&self) -> Ref<Heap> {
-        self.heap.borrow()
     }
 
     /// Executes the code with the given input values.
@@ -70,16 +60,15 @@ impl<'c> Executor<'c> {
     ///
     /// # Arguments
     /// * `inputs` - Values to fill the first N slots of the namespace (e.g., function parameters)
-    pub fn run(&self, inputs: Vec<Object>) -> Result<Exit<'c>, InternalRunError> {
+    pub fn run<'h>(&'h mut self, inputs: Vec<Object>) -> Result<Exit<'c, 'h>, InternalRunError> {
         // Clear heap before starting new execution
-        let mut heap = self.heap.borrow_mut();
-        heap.clear();
+        self.heap.clear();
 
         // Convert initial namespace from Literals to Objects with heap allocation
         let mut namespace: Vec<Object> = self
             .initial_namespace
             .iter()
-            .map(|lit| lit.to_object(&mut heap))
+            .map(|lit| lit.to_object(&mut self.heap))
             .collect();
 
         // Fill in the input values (overwriting the default Undefined slots)
@@ -87,8 +76,8 @@ impl<'c> Executor<'c> {
             namespace[i] = input;
         }
 
-        match RunFrame::new(namespace).execute(&mut heap, &self.nodes) {
-            Ok(v) => Ok(v),
+        match RunFrame::new(namespace).execute(&mut self.heap, &self.nodes) {
+            Ok(v) => Ok(Exit::new(v, &self.heap)),
             Err(e) => match e {
                 RunError::Exc(exc) => Ok(Exit::Raise(exc)),
                 RunError::Internal(internal) => Err(internal),
