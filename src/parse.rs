@@ -1,3 +1,4 @@
+use std::str::FromStr;
 use std::{borrow::Cow, fmt};
 
 use ruff_python_ast::{
@@ -6,7 +7,7 @@ use ruff_python_ast::{
 use ruff_python_parser::parse_module;
 use ruff_text_size::TextRange;
 
-use crate::expressions::{Const, Expr, ExprLoc, Function, Identifier, Kwarg, Node};
+use crate::expressions::{Callable, Const, Expr, ExprLoc, Identifier, Kwarg, Node};
 use crate::operators::{CmpOperator, Operator};
 use crate::parse_error::{ParseError, ParseResult};
 
@@ -241,9 +242,12 @@ impl<'c> Parser<'c> {
                 let position = self.convert_range(range);
                 match *func {
                     AstExpr::Name(ast::ExprName { id, range, .. }) => {
-                        let func = Identifier::from_name(id.to_string(), self.convert_range(range));
-                        let func = Function::Ident(func);
-                        Ok(ExprLoc::new(position, Expr::Call { func, args, kwargs }))
+                        let name = id.to_string();
+                        let callable = match Callable::from_str(&name) {
+                            Ok(func) => func,
+                            Err(()) => Callable::Ident(Identifier::new(name, self.convert_range(range))),
+                        };
+                        Ok(ExprLoc::new(position, Expr::Call { callable, args, kwargs }))
                     }
                     AstExpr::Attribute(ast::ExprAttribute { value, attr, .. }) => {
                         let object = self.parse_identifier(*value)?;
@@ -301,7 +305,7 @@ impl<'c> Parser<'c> {
             AstExpr::Starred(_) => Err(ParseError::Todo("Starred")),
             AstExpr::Name(ast::ExprName { id, range, .. }) => Ok(ExprLoc::new(
                 self.convert_range(range),
-                Expr::Name(Identifier::from_name(id.to_string(), self.convert_range(range))),
+                Expr::Name(Identifier::new(id.to_string(), self.convert_range(range))),
             )),
             AstExpr::List(ast::ExprList { elts, range, .. }) => {
                 let items = elts
@@ -336,14 +340,14 @@ impl<'c> Parser<'c> {
     fn parse_identifier(&self, ast: AstExpr) -> ParseResult<'c, Identifier<'c>> {
         match ast {
             AstExpr::Name(ast::ExprName { id, range, .. }) => {
-                Ok(Identifier::from_name(id.to_string(), self.convert_range(range)))
+                Ok(Identifier::new(id.to_string(), self.convert_range(range)))
             }
             other => Err(ParseError::Internal(format!("Expected name, got {other:?}").into())),
         }
     }
 
     fn identifier_from_node(&self, identifier: ast::Identifier) -> Identifier<'c> {
-        Identifier::from_name(identifier.id.to_string(), self.convert_range(identifier.range))
+        Identifier::new(identifier.id.to_string(), self.convert_range(identifier.range))
     }
 
     fn convert_range(&self, range: TextRange) -> CodeRange<'c> {

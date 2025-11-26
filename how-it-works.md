@@ -450,27 +450,29 @@ fn add(&self, other: &Object) -> Option<Object> {
 }
 ```
 
-### src/object_types.rs (97 lines)
-**Responsibility**: Builtin functions and exception constructors
+### src/builtins.rs (112 lines)
+**Responsibility**: Builtin functions and exception-like constructors
 
 **Key Structures:**
 ```rust
-pub enum Types {
-    Function(FunctionTypes),
-    Exception(ExcType),
-    Range,
-}
-
-pub enum FunctionTypes {
+pub enum Builtins {
     Print,
     Len,
+    Str,
+    Repr,
+    Id,
+    Range,
 }
 ```
 
 **Functions:**
-- `find()`: Maps name string to `Types` at prepare time
-- `call_function()`: Execute builtin with argument validation
-- `side_effects()`: Mark functions that prevent constant folding
+- `from_name()`: Maps a Python identifier to a builtin variant
+- `call()`: Executes builtin logic with argument validation
+- `name()`: Returns canonical Python spelling for display/logging
+
+Exception types (`ExcType`) continue to live in `exceptions.rs`; the prepare phase now
+directly tags calls as either `Function::Builtin(Builtins)` or `Function::Exception(ExcType)` so
+runtime dispatch no longer needs an intermediate `Types` enum.
 
 ### src/expressions.rs (228 lines)
 **Responsibility**: Internal AST types
@@ -565,7 +567,7 @@ vec![
         target: Identifier { name: "i", id: None, ... },
         iter: ExprLoc {
             expr: Expr::Call {
-                func: Function::Builtin(Types::Range),
+                func: Function::Builtin(Builtins::Range),
                 args: [Expr::Constant(Object::Int(3))]
             }
         },
@@ -581,7 +583,7 @@ vec![
         ]
     },
     Node::Expr(Expr::Call {
-        func: Function::Builtin(Types::Function(FunctionTypes::Print)),
+        func: Function::Builtin(Builtins::Print),
         args: [Expr::Name(Identifier { name: "x", ... })]
     })
 ]
@@ -913,7 +915,7 @@ print(len(v))      # Prints: 2
 - Created new `operators.rs` module for operator definitions
 - Renamed `types.rs` → `expressions.rs` (clearer name)
 - Moved `Operator` and `CmpOperator` enums to dedicated file
-- Moved builtin function/type definitions to `object_types.rs`
+- Consolidated builtin function/type definitions into dedicated module (`builtins.rs`)
 - Cleaner module boundaries and responsibilities
 
 **File Structure:**
@@ -925,7 +927,7 @@ Before:
 After:
 - src/expressions.rs (pure AST types: Node, Expr, etc.)
 - src/operators.rs (pure operator enums)
-- src/object_types.rs (builtin functions and exception constructors)
+- src/builtins.rs (builtin functions and exception constructors)
 ```
 
 **Benefits:**
@@ -1039,7 +1041,7 @@ static GLOBAL: mimalloc::MiMalloc = mimalloc::MiMalloc;
 - ✅ Exception raising with multiple arguments
 - ✅ List methods: `append()`, `insert()`
 - ✅ ModEq optimization for `(x % y) == z` patterns
-- ✅ Clean module organization (separate operators, expressions, object_types)
+- ✅ Clean module organization (separate operators, expressions, builtins)
 - ✅ Borrow-safe evaluation patterns throughout
 
 **Current Limitations:**

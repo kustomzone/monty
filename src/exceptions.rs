@@ -1,5 +1,6 @@
 use std::borrow::Cow;
 use std::fmt;
+use std::str::FromStr;
 
 use crate::expressions::ExprLoc;
 use crate::object::{string_repr, Attr, Object};
@@ -32,6 +33,28 @@ impl ExcType {
             Self::TypeError => "TypeError",
             Self::NameError => "NameError",
             Self::AttributeError => "AttributeError",
+        }
+    }
+}
+
+/// Parses an exception type from its string representation.
+///
+/// Returns `Ok(ExcType)` if the name matches a known exception type,
+/// or `Err(())` if the name is not recognized.
+///
+/// # Examples
+/// - `"ValueError".parse::<ExcType>()` returns `Ok(ExcType::ValueError)`
+/// - `"UnknownError".parse::<ExcType>()` returns `Err(())`
+impl FromStr for ExcType {
+    type Err = ();
+
+    fn from_str(name: &str) -> Result<Self, Self::Err> {
+        match name {
+            "ValueError" => Ok(Self::ValueError),
+            "TypeError" => Ok(Self::TypeError),
+            "NameError" => Ok(Self::NameError),
+            "AttributeError" => Ok(Self::AttributeError),
+            _ => Err(()),
         }
     }
 }

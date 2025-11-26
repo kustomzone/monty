@@ -1,10 +1,10 @@
+mod builtins;
 mod evaluate;
 mod exceptions;
 mod exit;
 mod expressions;
 mod heap;
 mod object;
-mod object_types;
 mod operators;
 mod parse;
 mod parse_error;

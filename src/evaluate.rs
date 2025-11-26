@@ -1,5 +1,5 @@
 use crate::exceptions::{internal_err, ExcType, InternalRunError, SimpleException};
-use crate::expressions::{Expr, ExprLoc, Function, Identifier, Kwarg};
+use crate::expressions::{Callable, Expr, ExprLoc, Identifier, Kwarg};
 use crate::heap::Heap;
 use crate::object::{Attr, Object};
 use crate::operators::{CmpOperator, Operator};
@@ -32,7 +32,7 @@ pub(crate) fn evaluate_use<'c, 'd>(
                     .into())
             }
         }
-        Expr::Call { func, args, kwargs } => Ok(call_function(namespace, heap, func, args, kwargs)?),
+        Expr::Call { callable, args, kwargs } => Ok(call_function(namespace, heap, callable, args, kwargs)?),
         Expr::AttrCall {
             object,
             attr,
@@ -85,7 +85,7 @@ pub(crate) fn evaluate_discard<'c, 'd>(
                     .into())
             }
         }
-        Expr::Call { func, args, kwargs } => call_function(namespace, heap, func, args, kwargs).map(|_| ()),
+        Expr::Call { callable, args, kwargs } => call_function(namespace, heap, callable, args, kwargs).map(|_| ()),
         Expr::AttrCall {
             object,
             attr,
@@ -172,25 +172,27 @@ fn cmp_op<'c, 'd>(
     }
 }
 
-/// Evaluates builtin function calls, collecting argument values via the shared heap.
+/// Evaluates callable function calls, collecting argument values via the shared heap.
+///
+/// Handles builtin functions, exception constructors, and (eventually) user-defined functions.
 fn call_function<'c, 'd>(
     namespace: &'d mut [Object],
     heap: &'d mut Heap,
-    function: &'d Function,
+    callable: &'d Callable,
     args: &'d [ExprLoc<'c>],
     _kwargs: &'d [Kwarg],
 ) -> RunResult<'c, Object> {
-    let builtin = match function {
-        Function::Builtin(builtin) => builtin,
-        Function::Ident(_) => {
-            return internal_err!(InternalRunError::TodoError; "User defined functions not yet implemented")
-        }
-    };
     let args = args
         .iter()
         .map(|a| evaluate_use(namespace, heap, a))
         .collect::<RunResult<_>>()?;
-    builtin.call_function(heap, args)
+    match callable {
+        Callable::Builtin(builtin) => builtin.call(heap, args),
+        Callable::Exception(exc_type) => call_exception(heap, args, *exc_type),
+        Callable::Ident(_) => {
+            internal_err!(InternalRunError::TodoError; "User defined functions not yet implemented")
+        }
+    }
 }
 
 /// Handles attribute method calls like `list.append`, again threading the heap for safety.
@@ -222,4 +224,22 @@ fn attr_call<'c, 'd>(
             .into());
     };
     object.call_attr(heap, attr, args)
+}
+
+fn call_exception<'c>(heap: &mut Heap, args: Vec<Object>, exc_type: ExcType) -> RunResult<'c, Object> {
+    if let Some(first) = args.first() {
+        if args.len() == 1 {
+            if let Object::Ref(object_id) = first {
+                if let HeapData::Str(s) = heap.get(*object_id) {
+                    return Ok(Object::Exc(SimpleException::new(
+                        exc_type,
+                        Some(s.as_str().to_owned().into()),
+                    )));
+                }
+            }
+        }
+        internal_err!(InternalRunError::TodoError; "Exceptions can only be called with zero or one string argument")
+    } else {
+        Ok(Object::Exc(SimpleException::new(exc_type, None)))
+    }
 }

@@ -2,9 +2,8 @@ use std::collections::hash_map::Entry;
 
 use ahash::AHashMap;
 
-use crate::exceptions::{internal_err, ExcType, ExceptionRaise, SimpleException};
-use crate::expressions::{Const, Expr, ExprLoc, Function, Identifier, Kwarg, Node};
-use crate::object_types::Types;
+use crate::exceptions::{ExcType, ExceptionRaise, SimpleException};
+use crate::expressions::{Const, Expr, ExprLoc, Identifier, Kwarg, Node};
 use crate::operators::{CmpOperator, Operator};
 use crate::parse_error::{ParseError, ParseResult};
 
@@ -99,8 +98,11 @@ impl Prepare {
                                     // Handle raising an exception type without instantiation, e.g. `raise TypeError`.
                                     // This is transformed into a call: `raise TypeError()` so the exception
                                     // is properly instantiated before being raised.
+                                    let callable = id.name.parse().map_err(|()| {
+                                        ParseError::Internal(format!("unknown function: `{}`", id.name).into())
+                                    })?;
                                     let expr = Expr::Call {
-                                        func: Function::Builtin(Types::find(&id.name)?),
+                                        callable,
                                         args: vec![],
                                         kwargs: vec![],
                                     };
@@ -174,16 +176,10 @@ impl Prepare {
                 op,
                 right: Box::new(self.prepare_expression(*right)?),
             },
-            Expr::Call { func, args, kwargs } => {
-                let ident = match func {
-                    Function::Ident(ident) => ident,
-                    Function::Builtin(_) => {
-                        return internal_err!(ParseError::Internal; "Call prepare expected an identifier")
-                    }
-                };
-                let func = Function::Builtin(Types::find(&ident.name)?);
+            Expr::Call { callable, args, kwargs } => {
+                // The callable is already resolved, just prepare the arguments and pass through
                 let (args, kwargs) = self.get_args_kwargs(args, kwargs)?;
-                Expr::Call { func, args, kwargs }
+                Expr::Call { callable, args, kwargs }
             }
             Expr::AttrCall {
                 object,

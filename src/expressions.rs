@@ -1,9 +1,10 @@
 use std::fmt;
+use std::str::FromStr;
 
-use crate::exceptions::ExceptionRaise;
+use crate::builtins::Builtins;
+use crate::exceptions::{ExcType, ExceptionRaise};
 use crate::heap::{Heap, HeapData};
 use crate::object::{Attr, Object};
-use crate::object_types::Types;
 use crate::operators::{CmpOperator, Operator};
 use crate::parse::CodeRange;
 
@@ -15,7 +16,7 @@ pub(crate) struct Identifier<'c> {
 }
 
 impl<'c> Identifier<'c> {
-    pub fn from_name(name: String, position: CodeRange<'c>) -> Self {
+    pub fn new(name: String, position: CodeRange<'c>) -> Self {
         Self { name, position, id: 0 }
     }
 }
@@ -26,18 +27,50 @@ pub(crate) struct Kwarg<'c> {
     pub value: ExprLoc<'c>,
 }
 
+/// Represents a callable entity in the Python runtime.
+///
+/// A callable can be a builtin function, an exception type (which acts as a constructor),
+/// or an identifier that will be resolved during preparation.
 #[derive(Debug, Clone)]
-pub(crate) enum Function<'c> {
-    Builtin(Types),
-    // TODO can we remove Ident here and thereby Function?
+pub(crate) enum Callable<'c> {
+    Builtin(Builtins),
+    Exception(ExcType),
+    // TODO can we remove Ident here and thereby simplify Callable?
     Ident(Identifier<'c>),
 }
 
-impl fmt::Display for Function<'_> {
+impl fmt::Display for Callable<'_> {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
             Self::Builtin(b) => write!(f, "{b}"),
+            Self::Exception(exc) => write!(f, "{exc}"),
             Self::Ident(i) => write!(f, "{}", i.name),
+        }
+    }
+}
+
+/// Parses a callable from its string representation.
+///
+/// Attempts to resolve the name as a builtin function first, then as an exception type.
+/// Returns an error if the name doesn't match any known builtin or exception.
+///
+/// This is used during the preparation phase to resolve identifier names into their
+/// corresponding builtin or exception type callables.
+///
+/// # Examples
+/// - `"print".parse::<Callable>()` returns `Ok(Callable::Builtin(Builtins::Print))`
+/// - `"ValueError".parse::<Callable>()` returns `Ok(Callable::Exception(ExcType::ValueError))`
+/// - `"unknown".parse::<Callable>()` returns `Err(())`
+impl FromStr for Callable<'static> {
+    type Err = ();
+
+    fn from_str(name: &str) -> Result<Self, Self::Err> {
+        if let Ok(builtin) = name.parse::<Builtins>() {
+            Ok(Self::Builtin(builtin))
+        } else if let Ok(exc_type) = name.parse::<ExcType>() {
+            Ok(Self::Exception(exc_type))
+        } else {
+            Err(())
         }
     }
 }
@@ -47,7 +80,7 @@ pub(crate) enum Expr<'c> {
     Constant(Const),
     Name(Identifier<'c>),
     Call {
-        func: Function<'c>,
+        callable: Callable<'c>,
         args: Vec<ExprLoc<'c>>,
         kwargs: Vec<Kwarg<'c>>,
     },
@@ -76,7 +109,7 @@ impl fmt::Display for Expr<'_> {
         match self {
             Self::Constant(object) => write!(f, "{}", object.repr()),
             Self::Name(identifier) => write!(f, "{}", identifier.name),
-            Self::Call { func, args, kwargs } => self.print_args(f, func, args, kwargs),
+            Self::Call { callable, args, kwargs } => self.print_args(f, callable, args, kwargs),
             Self::AttrCall {
                 object,
                 attr,
