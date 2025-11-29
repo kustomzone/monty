@@ -1,7 +1,7 @@
 use std::fmt;
 use std::str::FromStr;
 
-use crate::exceptions::{exc_err_fmt, internal_err, ExcType, InternalRunError};
+use crate::exceptions::{check_arg_count, exc_err_fmt, internal_err, ExcType, InternalRunError};
 use crate::heap::{Heap, HeapData};
 use crate::object::Object;
 use crate::run::RunResult;
@@ -46,7 +46,7 @@ impl FromStr for Builtins {
 
 impl Builtins {
     /// Executes the builtin with the provided positional arguments.
-    pub(crate) fn call<'c>(self, heap: &mut Heap, mut args: Vec<Object>) -> RunResult<'c, Object> {
+    pub(crate) fn call<'c>(self, heap: &mut Heap, args: Vec<Object>) -> RunResult<'c, Object> {
         match self {
             Self::Print => {
                 for (i, object) in args.iter().enumerate() {
@@ -60,43 +60,31 @@ impl Builtins {
                 Ok(Object::None)
             }
             Self::Len => {
-                if args.len() != 1 {
-                    return exc_err_fmt!(ExcType::TypeError; "len() takes exactly exactly one argument ({} given)", args.len());
-                }
-                let object = &args[0];
+                let [object] = check_arg_count::<1>("len", args)?;
                 match object.py_len(heap) {
                     Some(len) => Ok(Object::Int(len as i64)),
                     None => exc_err_fmt!(ExcType::TypeError; "Object of type {} has no len()", object.py_repr(heap)),
                 }
             }
             Self::Str => {
-                if args.len() != 1 {
-                    return exc_err_fmt!(ExcType::TypeError; "str() takes exactly exactly one argument ({} given)", args.len());
-                }
-                let object = &args[0];
+                let [object] = check_arg_count::<1>("str", args)?;
                 let object_id = heap.allocate(HeapData::Str(object.py_str(heap).into_owned().into()));
                 Ok(Object::Ref(object_id))
             }
             Self::Repr => {
-                if args.len() != 1 {
-                    return exc_err_fmt!(ExcType::TypeError; "repr() takes exactly exactly one argument ({} given)", args.len());
-                }
-                let object = &args[0];
+                let [object] = check_arg_count::<1>("repr", args)?;
                 let object_id = heap.allocate(HeapData::Str(object.py_repr(heap).into_owned().into()));
                 Ok(Object::Ref(object_id))
             }
             Self::Id => {
-                if args.len() != 1 {
-                    return exc_err_fmt!(ExcType::TypeError; "id() takes exactly exactly one argument ({} given)", args.len());
-                }
-                let object = &mut args[0];
+                let [mut object] = check_arg_count::<1>("id", args)?;
                 let id = object.id(heap);
                 // TODO might need to use bigint here
                 Ok(Object::Int(id as i64))
             }
             Self::Range => {
                 if args.len() == 1 {
-                    let object = &args[0];
+                    let [object] = check_arg_count::<1>("range", args)?;
                     let size = object.as_int()?;
                     Ok(Object::Range(size))
                 } else {
@@ -104,10 +92,7 @@ impl Builtins {
                 }
             }
             Self::Hash => {
-                if args.len() != 1 {
-                    return exc_err_fmt!(ExcType::TypeError; "hash() takes exactly one argument ({} given)", args.len());
-                }
-                let object = &args[0];
+                let [object] = check_arg_count::<1>("hash", args)?;
                 match object.py_hash_u64(heap) {
                     Some(hash) => Ok(Object::Int(hash as i64)),
                     None => Err(ExcType::type_error_unhashable(object.py_type(heap))),

@@ -78,6 +78,89 @@ impl ExcType {
         };
         SimpleException::new(Self::KeyError, Some(key_str.into())).into()
     }
+
+    /// Creates a TypeError for when a function receives the wrong number of arguments.
+    ///
+    /// Matches CPython's error format exactly:
+    /// - For 1 expected arg: `{name}() takes exactly one argument ({actual} given)`
+    /// - For N expected args: `{name} expected {expected} arguments, got {actual}`
+    ///
+    /// # Arguments
+    /// * `name` - The function name (e.g., "len" for builtins, "list.append" for methods)
+    /// * `expected` - Number of expected arguments
+    /// * `actual` - Number of arguments actually provided
+    #[must_use]
+    pub fn type_error_arg_count<'c>(name: &str, expected: usize, actual: usize) -> RunError<'c> {
+        if expected == 1 {
+            // CPython: "len() takes exactly one argument (2 given)"
+            exc_fmt!(Self::TypeError; "{}() takes exactly one argument ({} given)", name, actual).into()
+        } else {
+            // CPython: "insert expected 2 arguments, got 1"
+            exc_fmt!(Self::TypeError; "{} expected {} arguments, got {}", name, expected, actual).into()
+        }
+    }
+
+    /// Creates a TypeError for when a method that takes no arguments receives some.
+    ///
+    /// Matches CPython's format: `{name}() takes no arguments ({actual} given)`
+    ///
+    /// # Arguments
+    /// * `name` - The method name (e.g., "dict.keys")
+    /// * `actual` - Number of arguments actually provided
+    #[must_use]
+    pub fn type_error_no_args<'c>(name: &str, actual: usize) -> RunError<'c> {
+        // CPython: "dict.keys() takes no arguments (1 given)"
+        exc_fmt!(Self::TypeError; "{}() takes no arguments ({} given)", name, actual).into()
+    }
+
+    /// Creates a TypeError for when a function receives fewer arguments than required.
+    ///
+    /// Matches CPython's format: `{name} expected at least {min} argument, got {actual}`
+    ///
+    /// # Arguments
+    /// * `name` - The function name (e.g., "get", "pop")
+    /// * `min` - Minimum number of required arguments
+    /// * `actual` - Number of arguments actually provided
+    #[must_use]
+    pub fn type_error_at_least<'c>(name: &str, min: usize, actual: usize) -> RunError<'c> {
+        // CPython: "get expected at least 1 argument, got 0"
+        exc_fmt!(Self::TypeError; "{} expected at least {} argument, got {}", name, min, actual).into()
+    }
+
+    /// Creates a TypeError for when a function receives more arguments than allowed.
+    ///
+    /// Matches CPython's format: `{name} expected at most {max} arguments, got {actual}`
+    ///
+    /// # Arguments
+    /// * `name` - The function name (e.g., "get", "pop")
+    /// * `max` - Maximum number of allowed arguments
+    /// * `actual` - Number of arguments actually provided
+    #[must_use]
+    pub fn type_error_at_most<'c>(name: &str, max: usize, actual: usize) -> RunError<'c> {
+        // CPython: "get expected at most 2 arguments, got 3"
+        exc_fmt!(Self::TypeError; "{} expected at most {} arguments, got {}", name, max, actual).into()
+    }
+}
+
+/// Validates argument count and returns args as a fixed-size array.
+///
+/// Uses const generics so the compiler knows the exact array size at compile time,
+/// enabling safe pattern matching without runtime indexing or `.unwrap()`.
+///
+/// # Example
+/// ```ignore
+/// let [a, b] = check_arg_count::<2>("list.insert", args)?;
+/// ```
+pub fn check_arg_count<'c, const N: usize>(name: &str, args: Vec<Object>) -> Result<[Object; N], RunError<'c>> {
+    let actual = args.len();
+    if actual == N {
+        // Safe: we just verified length equals N
+        Ok(args
+            .try_into()
+            .unwrap_or_else(|_| unreachable!("length was just verified")))
+    } else {
+        Err(ExcType::type_error_arg_count(name, N, actual))
+    }
 }
 
 /// Parses an exception type from its string representation.

@@ -1,6 +1,6 @@
 use std::borrow::Cow;
 
-use crate::exceptions::{exc_err_fmt, ExcType};
+use crate::exceptions::{check_arg_count, exc_err_fmt, ExcType};
 use crate::heap::{Heap, HeapData, ObjectId};
 use crate::object::{Attr, Object};
 use crate::run::RunResult;
@@ -172,26 +172,12 @@ impl PyValue for List {
     fn py_call_attr<'c>(&mut self, heap: &mut Heap, attr: &Attr, args: Vec<Object>) -> RunResult<'c, Object> {
         match attr {
             Attr::Append => {
-                if args.len() != 1 {
-                    return exc_err_fmt!(
-                        ExcType::TypeError;
-                        "append() takes exactly one argument ({} given)",
-                        args.len()
-                    );
-                }
-                Ok(self.append(heap, args.into_iter().next().unwrap()))
+                let [item] = check_arg_count::<1>("list.append", args)?;
+                Ok(self.append(heap, item))
             }
             Attr::Insert => {
-                if args.len() != 2 {
-                    return exc_err_fmt!(
-                        ExcType::TypeError;
-                        "insert() expected 2 arguments, got {}",
-                        args.len()
-                    );
-                }
-                let mut args_iter = args.into_iter();
-                let index = args_iter.next().unwrap().as_int()? as usize;
-                let item = args_iter.next().unwrap();
+                let [index_obj, item] = check_arg_count::<2>("list.insert", args)?;
+                let index = index_obj.as_int()? as usize;
                 Ok(self.insert(heap, index, item))
             }
             Attr::Get | Attr::Keys | Attr::Values | Attr::Items | Attr::Pop | Attr::Other(_) => {

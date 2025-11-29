@@ -3,7 +3,7 @@ use std::fmt::Write;
 
 use indexmap::IndexMap;
 
-use crate::exceptions::{exc_err_fmt, ExcType};
+use crate::exceptions::ExcType;
 use crate::heap::{Heap, HeapData, ObjectId};
 use crate::object::{Attr, Object};
 use crate::run::RunResult;
@@ -312,17 +312,10 @@ impl PyValue for Dict {
         match attr {
             Attr::Get => {
                 if args.is_empty() {
-                    return exc_err_fmt!(
-                        ExcType::TypeError;
-                        "get expected at least 1 argument, got 0"
-                    );
+                    return Err(ExcType::type_error_at_least("get", 1, 0));
                 }
                 if args.len() > 2 {
-                    return exc_err_fmt!(
-                        ExcType::TypeError;
-                        "get expected at most 2 arguments, got {}",
-                        args.len()
-                    );
+                    return Err(ExcType::type_error_at_most("get", 2, args.len()));
                 }
                 let key = &args[0];
                 match self.get(key, heap)? {
@@ -339,11 +332,7 @@ impl PyValue for Dict {
             }
             Attr::Keys => {
                 if !args.is_empty() {
-                    return exc_err_fmt!(
-                        ExcType::TypeError;
-                        "keys() takes no arguments ({} given)",
-                        args.len()
-                    );
+                    return Err(ExcType::type_error_no_args("dict.keys", args.len()));
                 }
                 let keys = self.keys();
                 // Increment refcounts for all keys in the list
@@ -357,11 +346,7 @@ impl PyValue for Dict {
             }
             Attr::Values => {
                 if !args.is_empty() {
-                    return exc_err_fmt!(
-                        ExcType::TypeError;
-                        "values() takes no arguments ({} given)",
-                        args.len()
-                    );
+                    return Err(ExcType::type_error_no_args("dict.values", args.len()));
                 }
                 let values = self.values();
                 // Increment refcounts for all values in the list
@@ -375,11 +360,7 @@ impl PyValue for Dict {
             }
             Attr::Items => {
                 if !args.is_empty() {
-                    return exc_err_fmt!(
-                        ExcType::TypeError;
-                        "items() takes no arguments ({} given)",
-                        args.len()
-                    );
+                    return Err(ExcType::type_error_no_args("dict.items", args.len()));
                 }
                 let items = self.items();
                 // Convert to list of tuples
@@ -399,17 +380,10 @@ impl PyValue for Dict {
             }
             Attr::Pop => {
                 if args.is_empty() {
-                    return exc_err_fmt!(
-                        ExcType::TypeError;
-                        "pop expected at least 1 argument, got 0"
-                    );
+                    return Err(ExcType::type_error_at_least("pop", 1, 0));
                 }
                 if args.len() > 2 {
-                    return exc_err_fmt!(
-                        ExcType::TypeError;
-                        "pop expected at most 2 arguments, got {}",
-                        args.len()
-                    );
+                    return Err(ExcType::type_error_at_most("pop", 2, args.len()));
                 }
                 let key = &args[0];
                 match self.pop(key, heap)? {
