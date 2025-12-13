@@ -41,7 +41,7 @@ impl std::error::Error for ResourceError {}
 /// All implementations should eventually trigger garbage collection to handle
 /// reference cycles. The `should_gc` method controls *frequency*, not whether
 /// GC runs at all.
-pub trait ResourceTracker {
+pub trait ResourceTracker: fmt::Debug {
     /// Called before each heap allocation.
     ///
     /// Returns `Ok(())` if the allocation should proceed, or `Err(ResourceError)`
@@ -66,6 +66,10 @@ pub trait ResourceTracker {
     /// Returns true if garbage collection should run.
     ///
     /// Called at statement boundaries where we have access to GC roots.
+    ///
+    ///  Note: GC won't run during long-running single expressions (e.g., large list
+    /// comprehensions). This is acceptable because most Python code is structured
+    /// as multiple statements, and resource limits (time, memory) still apply.
     fn should_gc(&self) -> bool;
 
     /// Called after garbage collection completes.

@@ -45,7 +45,19 @@ pub(crate) fn prepare(parse_result: ParseResult, input_names: &[&str]) -> Result
     let ParseResult { nodes, interner } = parse_result;
     let mut functions = Vec::new();
     let mut p = Prepare::new_module(nodes.len(), input_names, &interner, &mut functions);
-    let prepared_nodes = p.prepare_nodes(nodes)?;
+    let mut prepared_nodes = p.prepare_nodes(nodes)?;
+
+    // In the root frame,the last expression is implicitly returned
+    // if it's not None. This matches Python REPL behavior where the last expression
+    // value is displayed/returned.
+    if let Some(Node::Expr(expr_loc)) = prepared_nodes.last() {
+        if !expr_loc.expr.is_none() {
+            let new_expr_loc = expr_loc.clone();
+            prepared_nodes.pop();
+            prepared_nodes.push(Node::Return(new_expr_loc));
+        }
+    }
+
     Ok(PrepareResult {
         namespace_size: p.namespace_size,
         #[cfg(feature = "ref-counting")]
@@ -78,9 +90,6 @@ struct Prepare<'i> {
     name_map: AHashMap<String, NamespaceId>,
     /// Number of items in the namespace
     pub namespace_size: usize,
-    /// Root frame is the outer frame of the script, e.g. the "global" scope.
-    /// When true, the last expression in a block is implicitly returned.
-    root_frame: bool,
     /// Whether this is the module-level scope.
     /// At module level, all variables are global and `global` keyword is a no-op.
     is_module_scope: bool,
@@ -138,7 +147,6 @@ impl<'i> Prepare<'i> {
             interner,
             name_map,
             namespace_size,
-            root_frame: true,
             is_module_scope: true,
             global_names: AHashSet::new(),
             assigned_names: AHashSet::new(),
@@ -218,7 +226,6 @@ impl<'i> Prepare<'i> {
             interner,
             name_map,
             namespace_size,
-            root_frame: false,
             is_module_scope: false,
             global_names,
             assigned_names,
@@ -244,25 +251,16 @@ impl<'i> Prepare<'i> {
     fn prepare_nodes(&mut self, nodes: Vec<ParseNode>) -> Result<Vec<Node>, ParseError> {
         let nodes_len = nodes.len();
         let mut new_nodes = Vec::with_capacity(nodes_len);
-        for (index, node) in nodes.into_iter().enumerate() {
+        for node in nodes {
             match node {
                 ParseNode::Pass => (),
-                ParseNode::Expr(expr) => {
-                    let expr = self.prepare_expression(expr)?;
-                    // In the root frame (global scope), the last expression is implicitly returned
-                    // if it's not None. This matches Python REPL behavior where the last expression
-                    // value is displayed/returned.
-                    if self.root_frame && index == nodes_len - 1 && !expr.expr.is_none() {
-                        new_nodes.push(Node::Return(expr));
-                    } else {
-                        new_nodes.push(Node::Expr(expr));
-                    }
-                }
-                ParseNode::Return(expr) => {
-                    let expr = self.prepare_expression(expr)?;
-                    new_nodes.push(Node::Return(expr));
-                }
+                ParseNode::Expr(expr) => new_nodes.push(Node::Expr(self.prepare_expression(expr)?)),
+                ParseNode::Return(expr) => new_nodes.push(Node::Return(self.prepare_expression(expr)?)),
                 ParseNode::ReturnNone => new_nodes.push(Node::ReturnNone),
+                ParseNode::Yield(expr) => {
+                    let prepared_expr = expr.map(|e| self.prepare_expression(e)).transpose()?;
+                    new_nodes.push(Node::Yield(prepared_expr));
+                }
                 ParseNode::Raise(exc) => {
                     let expr = match exc {
                         Some(expr) => {
@@ -997,6 +995,7 @@ fn collect_scope_info_from_node(
         | ParseNode::Expr(_)
         | ParseNode::Return(_)
         | ParseNode::ReturnNone
+        | ParseNode::Yield(_)
         | ParseNode::Raise(_)
         | ParseNode::Assert { .. } => {}
     }
@@ -1120,6 +1119,8 @@ fn collect_referenced_names_from_node(node: &ParseNode, referenced: &mut AHashSe
         ParseNode::FunctionDef { .. } => {
             // Don't recurse into nested function bodies - they have their own scope
         }
+        ParseNode::Yield(Some(expr)) => collect_referenced_names_from_expr(expr, referenced, interner),
+        ParseNode::Yield(None) => {}
         ParseNode::Pass | ParseNode::ReturnNone | ParseNode::Global(_) | ParseNode::Nonlocal(_) => {}
     }
 }

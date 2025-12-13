@@ -11,7 +11,6 @@ use serde::{Deserialize, Deserializer, Serialize, Serializer};
 
 use crate::{
     exceptions::{ExcType, SimpleException},
-    expressions::FrameExit,
     heap::{Heap, HeapData, HeapId},
     intern::Interns,
     resource::ResourceTracker,
@@ -119,20 +118,16 @@ impl fmt::Display for PyObject {
 }
 
 impl PyObject {
-    /// Converts a `FrameExit` into a `PyObject`, properly handling reference counting.
+    /// Converts a `Value` into a `PyObject`, properly handling reference counting.
     ///
-    /// Takes ownership of the `FrameExit` and its contained `Value`, extracts the value,
+    /// Takes ownership of the `Value`, extracts its content to create a PyObject,
     /// then properly drops the Value via `drop_with_heap` to maintain reference counting.
     ///
     /// The `interns` parameter is used to look up interned string/bytes content.
-    pub(crate) fn new<T: ResourceTracker>(exit: FrameExit, heap: &mut Heap<T>, interns: &Interns) -> Self {
-        match exit {
-            FrameExit::Return(obj) => {
-                let value = Self::from_value(&obj, heap, interns);
-                obj.drop_with_heap(heap);
-                value
-            }
-        }
+    pub(crate) fn new<T: ResourceTracker>(value: Value, heap: &mut Heap<T>, interns: &Interns) -> Self {
+        let py_obj = Self::from_value(&value, heap, interns);
+        value.drop_with_heap(heap);
+        py_obj
     }
 
     /// Converts this `PyObject` into an `Value`, allocating on the heap if needed.

@@ -2,11 +2,12 @@ use std::fmt::Write;
 
 use crate::{
     args::ArgValues,
-    exceptions::{ExcType, SimpleException, StackFrame},
-    expressions::{FrameExit, Identifier, Node},
+    exceptions::{ExcType, RunError, SimpleException, StackFrame},
+    expressions::{Identifier, Node},
     heap::{Heap, HeapId},
     intern::{Interns, StringId},
     namespace::{NamespaceId, Namespaces},
+    position::{FrameExit, NoPositionTracker},
     resource::ResourceTracker,
     run_frame::{RunFrame, RunResult},
     value::Value,
@@ -144,7 +145,8 @@ impl Function {
         let parent_frame = StackFrame::new(self.name.position, self.name.name_id, None);
 
         // Execute the function body in a new frame
-        let frame = RunFrame::function_frame(local_idx, self.name.name_id, Some(parent_frame), interns);
+        let mut p = NoPositionTracker;
+        let mut frame = RunFrame::function_frame(local_idx, self.name.name_id, Some(parent_frame), interns, &mut p);
 
         let result = frame.execute(namespaces, heap, &self.body);
 
@@ -152,7 +154,14 @@ impl Function {
         namespaces.pop_with_heap(heap);
 
         match result {
-            Ok(FrameExit::Return(obj)) => Ok(obj),
+            Ok(Some(FrameExit::Return(obj))) => Ok(obj),
+            Ok(Some(FrameExit::Yield(_))) => {
+                // Yield inside a function would create a generator - not yet supported
+                Err(RunError::Exc(
+                    ExcType::not_implemented("yield inside functions (generators)").into(),
+                ))
+            }
+            Ok(None) => Ok(Value::None),
             Err(e) => Err(e),
         }
     }
@@ -209,7 +218,8 @@ impl Function {
         let parent_frame = StackFrame::new(self.name.position, self.name.name_id, None);
 
         // Execute the function body in a new frame
-        let frame = RunFrame::function_frame(local_idx, self.name.name_id, Some(parent_frame), interns);
+        let mut p = NoPositionTracker;
+        let mut frame = RunFrame::function_frame(local_idx, self.name.name_id, Some(parent_frame), interns, &mut p);
 
         let result = frame.execute(namespaces, heap, &self.body);
 
@@ -217,7 +227,14 @@ impl Function {
         namespaces.pop_with_heap(heap);
 
         match result {
-            Ok(FrameExit::Return(obj)) => Ok(obj),
+            Ok(Some(FrameExit::Return(obj))) => Ok(obj),
+            Ok(Some(FrameExit::Yield(_))) => {
+                // Yield inside a function would create a generator - not yet supported
+                Err(RunError::Exc(
+                    ExcType::not_implemented("yield inside functions (generators)").into(),
+                ))
+            }
+            Ok(None) => Ok(Value::None),
             Err(e) => Err(e),
         }
     }

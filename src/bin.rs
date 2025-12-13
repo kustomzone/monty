@@ -3,7 +3,8 @@ use std::fs;
 use std::process::ExitCode;
 use std::time::Instant;
 
-use monty::Executor;
+use monty::ExecProgress;
+use monty::ExecutorIter;
 
 fn main() -> ExitCode {
     let args: Vec<String> = env::args().collect();
@@ -11,35 +12,40 @@ fn main() -> ExitCode {
     let code = match read_file(file_path) {
         Ok(code) => code,
         Err(err) => {
-            eprintln!("{err}");
+            eprintln!("error: {err}");
             return ExitCode::FAILURE;
         }
     };
-    // let input_names = vec!["foo", "bar"];
-    // let inputs = vec![Value::Int(1), Value::Int(2)];
     let input_names = vec![];
     let inputs = vec![];
 
-    let ex = match Executor::new(&code, file_path, &input_names) {
+    let ex = match ExecutorIter::new(&code, file_path, &input_names) {
         Ok(ex) => ex,
         Err(err) => {
-            eprintln!("{err}");
+            eprintln!("error: {err}");
             return ExitCode::FAILURE;
         }
     };
 
-    let tic = Instant::now();
-    let r = ex.run_no_limits(inputs);
-    let toc = Instant::now();
-    eprintln!("Elapsed time: {:?}\n", toc - tic);
-    match r {
-        Ok(exit) => {
-            println!("Exit:\n{exit}");
-            ExitCode::SUCCESS
-        }
-        Err(err) => {
-            eprintln!("Error running code: {err}");
-            ExitCode::FAILURE
+    let start = Instant::now();
+    let mut progress_result = ex.run_no_limits(inputs);
+    loop {
+        match progress_result {
+            Ok(ExecProgress::Complete(value)) => {
+                let elapsed = start.elapsed();
+                eprintln!("{elapsed:?}, output: {value}");
+                return ExitCode::SUCCESS;
+            }
+            Ok(ExecProgress::Yield { value, state }) => {
+                let elapsed = start.elapsed();
+                eprintln!("{elapsed:?}, yield: {value}");
+                progress_result = state.run();
+            }
+            Err(err) => {
+                let elapsed = start.elapsed();
+                eprintln!("{elapsed:?}, error: {err}");
+                return ExitCode::FAILURE;
+            }
         }
     }
 }

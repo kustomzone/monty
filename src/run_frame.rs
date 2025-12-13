@@ -3,12 +3,13 @@ use crate::evaluate::EvaluateExpr;
 use crate::exceptions::{
     exc_err_static, exc_fmt, internal_err, ExcType, InternalRunError, RunError, SimpleException, StackFrame,
 };
-use crate::expressions::{ExprLoc, FrameExit, Identifier, NameScope, Node};
+use crate::expressions::{ExprLoc, Identifier, NameScope, Node};
 use crate::heap::{Heap, HeapData};
 use crate::intern::{FunctionId, Interns, StringId, MODULE_STRING_ID};
 use crate::namespace::{NamespaceId, Namespaces, GLOBAL_NS_IDX};
 use crate::operators::Operator;
 use crate::parse::CodeRange;
+use crate::position::{AbstractPositionTracker, ClauseState, FrameExit};
 use crate::resource::ResourceTracker;
 use crate::types::PyTrait;
 use crate::value::Value;
@@ -32,7 +33,7 @@ pub type RunResult<T> = Result<T, RunError>;
 /// When accessing a variable with `NameScope::Cell`, we look up the namespace
 /// slot to get the `Value::Ref(cell_id)`, then read/write through that cell.
 #[derive(Debug)]
-pub struct RunFrame<'i> {
+pub struct RunFrame<'i, P: AbstractPositionTracker> {
     /// Index of this frame's local namespace in Namespaces.
     local_idx: NamespaceId,
     /// Parent stack frame for error reporting.
@@ -40,19 +41,23 @@ pub struct RunFrame<'i> {
     /// The name of the current frame (function name or "<module>").
     /// Uses string id to lookup
     name: StringId,
+    /// reference to interns
     interns: &'i Interns,
+    /// reference to position tracker
+    position_tracker: &'i mut P,
 }
 
-impl<'i> RunFrame<'i> {
+impl<'i, P: AbstractPositionTracker> RunFrame<'i, P> {
     /// Creates a new frame for module-level execution.
     ///
     /// At module level, `local_idx` is `GLOBAL_NS_IDX` (0).
-    pub fn module_frame(interns: &'i Interns) -> Self {
+    pub fn module_frame(interns: &'i Interns, position_tracker: &'i mut P) -> Self {
         Self {
             local_idx: GLOBAL_NS_IDX,
             parent: None,
             name: MODULE_STRING_ID,
             interns,
+            position_tracker,
         }
     }
 
@@ -68,54 +73,81 @@ impl<'i> RunFrame<'i> {
     /// * `local_idx` - Index of the function's local namespace in Namespaces
     /// * `name` - The function name StringId (for error messages)
     /// * `parent` - Parent stack frame for error traceback
+    /// * `position_tracker` - Tracker for the current position in the code
     pub fn function_frame(
         local_idx: NamespaceId,
         name: StringId,
         parent: Option<StackFrame>,
         interns: &'i Interns,
+        position_tracker: &'i mut P,
     ) -> Self {
         Self {
             local_idx,
             parent,
             name,
             interns,
+            position_tracker,
         }
     }
 
+    /// Executes all nodes in sequence, returning when a frame exit (return/yield) occurs.
+    ///
+    /// This will use `PositionTracker` to manage where in the block to resume execution.
+    ///
+    /// # Arguments
+    /// * `namespaces` - The namespace stack
+    /// * `heap` - The heap for allocations
+    /// * `nodes` - The AST nodes to execute
     pub fn execute<T: ResourceTracker>(
-        &self,
+        &mut self,
         namespaces: &mut Namespaces,
         heap: &mut Heap<T>,
         nodes: &[Node],
-    ) -> RunResult<FrameExit> {
-        for node in nodes {
-            // Check time limit at statement boundaries
-            heap.tracker().check_time()?;
+    ) -> RunResult<Option<FrameExit>> {
+        // The first position must be an Index - it tells us where to start in this block
+        let position = self.position_tracker.next();
+        let start_index = position.index;
+        let mut clause_state = position.clause_state;
 
-            // Trigger garbage collection if scheduler says it's time.
-            // GC runs at statement boundaries because:
-            // 1. This is a natural pause point where we have access to GC roots
-            // 2. The namespace state is stable (not mid-expression evaluation)
-            // Note: GC won't run during long-running single expressions (e.g., large list
-            // comprehensions). This is acceptable because most Python code is structured
-            // as multiple statements, and resource limits (time, memory) still apply.
-            if heap.tracker().should_gc() {
-                heap.collect_garbage(|| namespaces.iter_heap_ids());
+        // Normal execution from start_index
+        for (i, node) in nodes.iter().enumerate().skip(start_index) {
+            if let Some(exit) = self.execute_node(namespaces, heap, node, clause_state)? {
+                // Set the index of the node to execute on resume
+                // we will have called set_skip() already if we need to skip the current node
+                self.position_tracker.record(i);
+                return Ok(Some(exit));
             }
-
-            if let Some(leave) = self.execute_node(namespaces, heap, node)? {
-                return Ok(leave);
-            }
+            clause_state = None;
         }
-        Ok(FrameExit::Return(Value::None))
+        Ok(None)
     }
 
+    /// Executes a single node, returning exit info with positions if execution should stop.
+    ///
+    /// Returns `Some(exit)` if the node caused a yield/return, where:
+    /// - `exit` is the FrameExit (Yield or Return)
+    /// - `positions` is the position stack within this node (empty for simple yields/returns)
     fn execute_node<T: ResourceTracker>(
-        &self,
+        &mut self,
         namespaces: &mut Namespaces,
         heap: &mut Heap<T>,
         node: &Node,
+        clause_state: Option<ClauseState>,
     ) -> RunResult<Option<FrameExit>> {
+        // Check time limit at statement boundaries
+        heap.tracker().check_time()?;
+
+        // Trigger garbage collection if scheduler says it's time.
+        // GC runs at statement boundaries because:
+        // 1. This is a natural pause point where we have access to GC roots
+        // 2. The namespace state is stable (not mid-expression evaluation)
+        // Note: GC won't run during long-running single expressions (e.g., large list
+        // comprehensions). This is acceptable because most Python code is structured
+        // as multiple statements, and resource limits (time, memory) still apply.
+        if heap.tracker().should_gc() {
+            heap.collect_garbage(|| namespaces.iter_heap_ids());
+        }
+
         match node {
             Node::Expr(expr) => {
                 if let Err(mut e) =
@@ -127,6 +159,14 @@ impl<'i> RunFrame<'i> {
             }
             Node::Return(expr) => return Ok(Some(FrameExit::Return(self.execute_expr(namespaces, heap, expr)?))),
             Node::ReturnNone => return Ok(Some(FrameExit::Return(Value::None))),
+            Node::Yield(expr) => {
+                let value = match expr {
+                    Some(e) => self.execute_expr(namespaces, heap, e)?,
+                    None => Value::None,
+                };
+                self.position_tracker.set_skip();
+                return Ok(Some(FrameExit::Yield(value)));
+            }
             Node::Raise(exc) => self.raise(namespaces, heap, exc.as_ref())?,
             Node::Assert { test, msg } => self.assert_(namespaces, heap, test, msg.as_ref())?,
             Node::Assign { target, object } => self.assign(namespaces, heap, target, object)?,
@@ -139,8 +179,24 @@ impl<'i> RunFrame<'i> {
                 iter,
                 body,
                 or_else,
-            } => self.for_loop(namespaces, heap, target, iter, body, or_else)?,
-            Node::If { test, body, or_else } => self.if_(namespaces, heap, test, body, or_else)?,
+            } => {
+                let start_index = match clause_state {
+                    Some(ClauseState::For(resume_index)) => resume_index,
+                    _ => 0,
+                };
+                if let Some(exit_frame) = self.for_(namespaces, heap, target, iter, body, or_else, start_index)? {
+                    return Ok(Some(exit_frame));
+                }
+            }
+            Node::If { test, body, or_else } => {
+                let if_test = match clause_state {
+                    Some(ClauseState::If(resume_test)) => &resume_test.into(),
+                    _ => test,
+                };
+                if let Some(exit_frame) = self.if_(namespaces, heap, if_test, body, or_else)? {
+                    return Ok(Some(exit_frame));
+                }
+            }
             Node::FunctionDef(function_id) => self.define_function(namespaces, heap, *function_id)?,
         }
         Ok(None)
@@ -183,7 +239,7 @@ impl<'i> RunFrame<'i> {
     /// * Exception type (Value::Callable with ExcType) - instantiate then raise
     /// * Anything else - TypeError
     fn raise<T: ResourceTracker>(
-        &self,
+        &mut self,
         namespaces: &mut Namespaces,
         heap: &mut Heap<T>,
         op_exc_expr: Option<&ExprLoc>,
@@ -220,7 +276,7 @@ impl<'i> RunFrame<'i> {
     ///
     /// If a message expression is provided, it is evaluated and used as the exception message.
     fn assert_<T: ResourceTracker>(
-        &self,
+        &mut self,
         namespaces: &mut Namespaces,
         heap: &mut Heap<T>,
         test: &ExprLoc,
@@ -244,7 +300,7 @@ impl<'i> RunFrame<'i> {
     }
 
     fn assign<T: ResourceTracker>(
-        &self,
+        &mut self,
         namespaces: &mut Namespaces,
         heap: &mut Heap<T>,
         target: &Identifier,
@@ -275,7 +331,7 @@ impl<'i> RunFrame<'i> {
     }
 
     fn op_assign<T: ResourceTracker>(
-        &self,
+        &mut self,
         namespaces: &mut Namespaces,
         heap: &mut Heap<T>,
         target: &Identifier,
@@ -468,43 +524,66 @@ impl<'i> RunFrame<'i> {
         }
     }
 
+    /// Executes a for loop, propagating any `FrameExit` (yield/return) from the body.
+    ///
+    /// Returns `Some(FrameExit)` if a yield or explicit return occurred in the body,
+    /// `None` if the loop completed normally.
+    ///
+    /// # Note on Yield Resumption
+    ///
+    /// TODO: For loop resumption after yield is not yet supported. Currently, yielding
+    /// inside a for loop will detect the yield and return it, but resumption will
+    /// continue after the entire for loop rather than from within the loop body.
+    /// Supporting this requires tracking the loop iteration index in the position stack.
     #[allow(clippy::too_many_arguments)]
-    fn for_loop<T: ResourceTracker>(
-        &self,
+    fn for_<T: ResourceTracker>(
+        &mut self,
         namespaces: &mut Namespaces,
         heap: &mut Heap<T>,
         target: &Identifier,
         iter: &ExprLoc,
         body: &[Node],
         _or_else: &[Node],
-    ) -> RunResult<()> {
+        start_index: usize,
+    ) -> RunResult<Option<FrameExit>> {
         let Value::Range(range_size) = self.execute_expr(namespaces, heap, iter)? else {
             return internal_err!(InternalRunError::TodoError; "`for` iter must be a range");
         };
 
-        for value in 0i64..range_size {
+        let namespace_id = target.namespace_id();
+        for value in (0i64..range_size).skip(start_index) {
             // For loop target is always local scope
             let namespace = namespaces.get_mut(self.local_idx);
-            namespace.set(target.namespace_id(), Value::Int(value));
-            self.execute(namespaces, heap, body)?;
+            namespace.set(namespace_id, Value::Int(value));
+            if let Some(exit) = self.execute(namespaces, heap, body)? {
+                self.position_tracker.set_clause_state(ClauseState::For(value as usize));
+                return Ok(Some(exit));
+            }
         }
-        Ok(())
+        Ok(None)
     }
 
+    /// Executes an if statement.
+    ///
+    /// Evaluates the test condition and executes the appropriate branch.
     fn if_<T: ResourceTracker>(
-        &self,
+        &mut self,
         namespaces: &mut Namespaces,
         heap: &mut Heap<T>,
         test: &ExprLoc,
         body: &[Node],
         or_else: &[Node],
-    ) -> RunResult<()> {
+    ) -> RunResult<Option<FrameExit>> {
         if self.execute_expr_bool(namespaces, heap, test)? {
-            self.execute(namespaces, heap, body)?;
-        } else {
-            self.execute(namespaces, heap, or_else)?;
+            if let Some(frame_exit) = self.execute(namespaces, heap, body)? {
+                self.position_tracker.set_clause_state(ClauseState::If(true));
+                return Ok(Some(frame_exit));
+            }
+        } else if let Some(frame_exit) = self.execute(namespaces, heap, or_else)? {
+            self.position_tracker.set_clause_state(ClauseState::If(false));
+            return Ok(Some(frame_exit));
         }
-        Ok(())
+        Ok(None)
     }
 
     /// Defines a function (or closure) by storing it in the namespace.

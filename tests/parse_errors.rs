@@ -1,5 +1,5 @@
 use monty::exceptions::ExcType;
-use monty::{Executor, ParseError};
+use monty::{Executor, ParseError, PyObject, RunError};
 
 /// Tests that unimplemented features return `NotImplementedError` exceptions.
 mod not_implemented_error {
@@ -43,9 +43,27 @@ mod not_implemented_error {
     }
 
     #[test]
-    fn generators_return_not_implemented_error() {
-        let result = Executor::new("def foo():\n    yield 1", "test.py", &[]);
-        assert_eq!(get_exc_type(result), ExcType::NotImplementedError);
+    fn generators_return_not_implemented_error_at_runtime() {
+        // Yield inside a function parses successfully but fails at runtime when called.
+        // The yield statement is parsed as module-level yield is now supported.
+        // When the function is called, it raises NotImplementedError.
+
+        let code = "def foo():\n    yield 1\nfoo()";
+        let exec = monty::ExecutorIter::new(code, "test.py", &[]).expect("should parse successfully");
+        let result = exec.run_no_limits(vec![] as Vec<PyObject>);
+        // Should fail at runtime with NotImplementedError when calling foo()
+        let err = result.expect_err("expected runtime error");
+        match err {
+            RunError::Exc(exc) => {
+                assert_eq!(exc.exc.exc_type(), ExcType::NotImplementedError);
+                let msg = exc.exc.arg().map_or(String::new(), std::string::ToString::to_string);
+                assert!(
+                    msg.contains("yield inside functions"),
+                    "message should mention 'yield inside functions', got: {msg}"
+                );
+            }
+            other => panic!("expected Exc error, got: {other:?}"),
+        }
     }
 
     #[test]

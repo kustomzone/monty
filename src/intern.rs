@@ -17,7 +17,7 @@ use crate::function::Function;
 ///
 /// Uses `u32` to save space (4 bytes vs 8 bytes for `usize`). This limits us to
 /// ~4 billion unique interns, which is more than sufficient.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default)]
 pub struct StringId(u32);
 
 /// The StringId for `"<module>"` - always index 0 in the interner.
@@ -145,7 +145,7 @@ impl InternerBuilder {
 /// Read-only storage for interned string and bytes.
 ///
 /// This provides lookup by `StringId`, `BytesId` and `FunctionId` for interned literals and functions
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub struct Interns {
     strings: Vec<String>,
     bytes: Vec<Vec<u8>>,

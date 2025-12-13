@@ -4,7 +4,7 @@
 /// allocation limits, time limits, and triggers garbage collection.
 use std::time::Duration;
 
-use monty::{Executor, ResourceLimits, RunError};
+use monty::{Executor, ExecutorIter, PyObject, ResourceLimits, RunError};
 
 /// Test that allocation limits return an error.
 #[test]
@@ -17,7 +17,7 @@ result
 ";
     let ex = Executor::new(code, "test.py", &[]).unwrap();
 
-    let limits = ResourceLimits::new().max_allocations(10);
+    let limits = ResourceLimits::new().max_allocations(4);
     let result = ex.run_with_limits(vec![], limits);
 
     // Should fail due to allocation limit
@@ -176,4 +176,92 @@ len(result)
     let result = ex.run_with_limits(vec![], limits);
 
     assert!(result.is_ok(), "should succeed with GC enabled");
+}
+
+#[test]
+#[cfg_attr(
+    feature = "dec-ref-check",
+    ignore = "resource exhaustion doesn't guarantee heap state consistency"
+)]
+fn executor_iter_resource_limit_on_resume() {
+    // Test that resource limits are enforced across yields
+    // First yield succeeds, but resumed execution exceeds limit
+    let code = "yield 1\nx = []\nfor i in range(10):\n    x.append(str(i))\nlen(x)";
+    let exec = ExecutorIter::new(code, "test.py", &[]).unwrap();
+
+    // First yield should succeed with generous limit
+    let limits = ResourceLimits::new().max_allocations(5);
+    let (value, state) = exec
+        .run_with_limits(vec![], limits)
+        .unwrap()
+        .into_yield()
+        .expect("yield");
+    assert_eq!(value, PyObject::Int(1));
+
+    // Resume - should fail due to allocation limit during the for loop
+    let result = state.run();
+    assert!(result.is_err(), "should exceed allocation limit on resume");
+    match result.unwrap_err() {
+        RunError::Resource(err) => {
+            let msg = err.to_string();
+            assert!(
+                msg.contains("allocation limit exceeded"),
+                "expected allocation limit error, got: {msg}"
+            );
+        }
+        other => panic!("expected Resource error, got: {other}"),
+    }
+}
+
+#[test]
+#[cfg_attr(
+    feature = "dec-ref-check",
+    ignore = "resource exhaustion doesn't guarantee heap state consistency"
+)]
+fn executor_iter_resource_limit_before_yield() {
+    // Test that resource limits are enforced before first yield
+    let code = "x = []\nfor i in range(10):\n    x.append(str(i))\nyield len(x)\n42";
+    let exec = ExecutorIter::new(code, "test.py", &[]).unwrap();
+
+    // Should fail before reaching the yield
+    let limits = ResourceLimits::new().max_allocations(3);
+    let result = exec.run_with_limits(vec![], limits);
+
+    assert!(result.is_err(), "should exceed allocation limit before yield");
+    match result.unwrap_err() {
+        RunError::Resource(err) => {
+            let msg = err.to_string();
+            assert!(
+                msg.contains("allocation limit exceeded"),
+                "expected allocation limit error, got: {msg}"
+            );
+        }
+        other => panic!("expected Resource error, got: {other}"),
+    }
+}
+
+#[test]
+fn executor_iter_resource_limit_multiple_yields() {
+    // Test resource limits across multiple yields
+    let code = "yield 1\nyield 2\nyield 3\n4";
+    let exec = ExecutorIter::new(code, "test.py", &[]).unwrap();
+
+    // Very tight allocation limit - should still work for simple yields
+    let limits = ResourceLimits::new().max_allocations(100);
+
+    let (value, state) = exec
+        .run_with_limits(vec![], limits)
+        .unwrap()
+        .into_yield()
+        .expect("first yield");
+    assert_eq!(value, PyObject::Int(1));
+
+    let (value, state) = state.run().unwrap().into_yield().expect("second yield");
+    assert_eq!(value, PyObject::Int(2));
+
+    let (value, state) = state.run().unwrap().into_yield().expect("third yield");
+    assert_eq!(value, PyObject::Int(3));
+
+    let result = state.run().unwrap().into_complete().expect("complete");
+    assert_eq!(result, PyObject::Int(4));
 }

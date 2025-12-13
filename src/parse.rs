@@ -29,6 +29,10 @@ pub enum ParseNode {
     Expr(ExprLoc),
     Return(ExprLoc),
     ReturnNone,
+    /// Yield statement with optional value expression.
+    ///
+    /// At module level, this pauses execution and returns control to the caller.
+    Yield(Option<ExprLoc>),
     Raise(Option<ExprLoc>),
     Assert {
         test: ExprLoc,
@@ -300,7 +304,7 @@ impl<'a> Parser<'a> {
                     .collect();
                 Ok(ParseNode::Nonlocal(names))
             }
-            Stmt::Expr(ast::StmtExpr { value, .. }) => Ok(ParseNode::Expr(self.parse_expression(*value)?)),
+            Stmt::Expr(ast::StmtExpr { value, .. }) => self.parse_full_expression(*value),
             Stmt::Pass(_) => Ok(ParseNode::Pass),
             Stmt::Break(_) => Err(not_implemented("break statements")),
             Stmt::Continue(_) => Err(not_implemented("continue statements")),
@@ -324,6 +328,15 @@ impl<'a> Parser<'a> {
                 target: self.parse_identifier(lhs)?,
                 object: self.parse_expression(rhs)?,
             })
+        }
+    }
+    fn parse_full_expression(&mut self, expression: AstExpr) -> Result<ParseNode, ParseError> {
+        // Check if this is a yield expression - treat it as a yield statement
+        if let AstExpr::Yield(ast::ExprYield { value: yield_value, .. }) = expression {
+            let expr = yield_value.map(|v| self.parse_expression(*v)).transpose()?;
+            Ok(ParseNode::Yield(expr))
+        } else {
+            Ok(ParseNode::Expr(self.parse_expression(expression)?))
         }
     }
 
@@ -789,7 +802,7 @@ fn convert_conversion_flag(flag: RuffConversionFlag) -> ConversionFlag {
 /// extracting the preview line from source during traceback formatting.
 ///
 /// To display the filename, the caller must provide access to the string storage.
-#[derive(Debug, Clone, Copy, Eq, PartialEq)]
+#[derive(Debug, Clone, Copy, Eq, PartialEq, Default)]
 pub struct CodeRange {
     /// Interned filename ID - look up in Interns to get the actual string.
     pub filename: StringId,
@@ -868,7 +881,7 @@ impl CodeRange {
     }
 }
 
-#[derive(Debug, Clone, Copy, Eq, PartialEq)]
+#[derive(Debug, Clone, Copy, Eq, PartialEq, Default)]
 struct CodeLoc {
     line: u32,
     column: u32,

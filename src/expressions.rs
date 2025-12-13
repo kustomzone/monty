@@ -195,6 +195,15 @@ pub struct ExprLoc {
     pub expr: Expr,
 }
 
+impl From<bool> for ExprLoc {
+    fn from(value: bool) -> Self {
+        Self {
+            position: CodeRange::default(),
+            expr: Expr::Literal(Literal::Bool(value)),
+        }
+    }
+}
+
 impl ExprLoc {
     pub fn new(position: CodeRange, expr: Expr) -> Self {
         Self { position, expr }
@@ -207,6 +216,11 @@ pub enum Node {
     Expr(ExprLoc),
     Return(ExprLoc),
     ReturnNone,
+    /// Yield statement with optional value expression.
+    ///
+    /// At module level, this pauses execution and returns control to the caller.
+    /// The yielded value (or None if no expression) is returned via `FrameExit::Yield`.
+    Yield(Option<ExprLoc>),
     Raise(Option<ExprLoc>),
     Assert {
         test: ExprLoc,
@@ -238,11 +252,4 @@ pub enum Node {
         or_else: Vec<Node>,
     },
     FunctionDef(FunctionId),
-}
-
-/// Result of executing a frame - either a return value or (future) yield.
-#[derive(Debug)]
-pub enum FrameExit {
-    Return(Value),
-    // Yield(Value),
 }
