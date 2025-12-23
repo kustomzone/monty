@@ -1044,15 +1044,13 @@ impl<T: ResourceTracker> Heap<T> {
                 }
             }
             HeapData::Dict(dict) => {
-                // Iterate through all hash buckets and their (key, value) pairs
-                for bucket in dict.as_index_map().values() {
-                    for (k, v) in bucket {
-                        if let Value::Ref(id) = k {
-                            work_list.push(*id);
-                        }
-                        if let Value::Ref(id) = v {
-                            work_list.push(*id);
-                        }
+                // Iterate through all entries to collect heap references
+                for (k, v) in dict {
+                    if let Value::Ref(id) = k {
+                        work_list.push(*id);
+                    }
+                    if let Value::Ref(id) = v {
+                        work_list.push(*id);
                     }
                 }
             }

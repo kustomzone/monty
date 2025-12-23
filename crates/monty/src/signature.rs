@@ -710,7 +710,7 @@ fn cleanup_on_error(
         val.drop_with_heap(heap);
     }
     // Clean up excess kwargs dict contents (keys and values)
-    for (key, value) in excess_kwargs.into_vec() {
+    for (key, value) in excess_kwargs {
         key.drop_with_heap(heap);
         value.drop_with_heap(heap);
     }

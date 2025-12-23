@@ -781,7 +781,7 @@ impl<'h, 's, T: ResourceTracker, W: PrintWriter> EvaluateExpr<'h, 's, T, W> {
 
         // Two-phase copy pattern (see extend_args_from_iterable for explanation)
         let copied_pairs: Vec<(Value, Value)> = dict
-            .iter_pairs()
+            .iter()
             .map(|(k, v)| (k.copy_for_extend(), v.copy_for_extend()))
             .collect();
 
@@ -868,7 +868,7 @@ impl<'h, 's, T: ResourceTracker, W: PrintWriter> EvaluateExpr<'h, 's, T, W> {
 
     /// Drops all entries in a dict by consuming it.
     fn drop_dict(&mut self, dict: Dict) {
-        for (key, value) in dict.into_vec() {
+        for (key, value) in dict {
             key.drop_with_heap(self.heap);
             value.drop_with_heap(self.heap);
         }

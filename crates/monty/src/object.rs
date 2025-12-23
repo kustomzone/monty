@@ -253,14 +253,12 @@ impl PyObject {
                             .collect(),
                     ),
                     HeapData::Dict(dict) => {
-                        let mut new_dict = IndexMap::with_capacity(dict.as_index_map().len());
-                        for bucket in dict.as_index_map().values() {
-                            for (k, v) in bucket {
-                                new_dict.insert(
-                                    PyObject::from_value_inner(k, heap, visited, interns),
-                                    PyObject::from_value_inner(v, heap, visited, interns),
-                                );
-                            }
+                        let mut new_dict = IndexMap::with_capacity(dict.len());
+                        for (k, v) in dict {
+                            new_dict.insert(
+                                PyObject::from_value_inner(k, heap, visited, interns),
+                                PyObject::from_value_inner(v, heap, visited, interns),
+                            );
                         }
                         Self::Dict(new_dict)
                     }

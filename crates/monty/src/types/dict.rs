@@ -1,7 +1,8 @@
 use std::fmt::Write;
 
 use ahash::AHashSet;
-use indexmap::IndexMap;
+use hashbrown::hash_table::Entry;
+use hashbrown::HashTable;
 
 use crate::args::ArgValues;
 use crate::exceptions::ExcType;
@@ -14,17 +15,17 @@ use crate::resource::ResourceTracker;
 use crate::run_frame::RunResult;
 use crate::value::{Attr, Value};
 
-/// Python dict type, wrapping an IndexMap to preserve insertion order.
+/// Python dict type preserving insertion order.
 ///
 /// This type provides Python dict semantics including dynamic key-value namespaces,
 /// reference counting for heap values, and standard dict methods like get, keys,
 /// values, items, and pop.
 ///
 /// # Storage Strategy
-/// Uses `IndexMap<u64, Vec<(Value, Value)>>` to preserve insertion order (matching
-/// Python 3.7+ behavior). The key is the hash of the dict key. The Vec handles hash
-/// collisions by storing multiple (key, value) pairs with the same hash, allowing
-/// proper equality checking for collisions.
+/// Uses a `HashTable<usize>` for hash lookups combined with a dense `Vec<DictEntry>`
+/// to preserve insertion order (matching Python 3.7+ behavior). The hash table maps
+/// key hashes to indices in the entries vector. This design provides O(1) lookups
+/// while maintaining insertion order for iteration.
 ///
 /// # Reference Counting
 /// When values are added via `set()`, their reference counts are incremented.
@@ -32,20 +33,32 @@ use crate::value::{Attr, Value};
 /// (caller must ensure values' refcounts account for the dict's reference).
 #[derive(Debug, Default)]
 pub struct Dict {
-    /// Maps hash -> list of (key, value) pairs with that hash
-    /// The Vec handles hash collisions. IndexMap preserves insertion order.
-    map: IndexMap<u64, Vec<(Value, Value)>>,
+    /// indices mapping from the entry hash to its index.
+    indices: HashTable<usize>,
+    /// entries is a dense vec maintaining entry order.
+    entries: Vec<DictEntry>,
+}
+
+#[derive(Debug)]
+struct DictEntry {
+    key: Value,
+    value: Value,
+    /// the hash is needed here for correct use of insert_unique
+    hash: u64,
 }
 
 impl Dict {
     /// Creates a new empty dict.
     #[must_use]
     pub fn new() -> Self {
-        Self { map: IndexMap::new() }
+        Self::default()
     }
 
-    pub fn as_index_map(&self) -> &IndexMap<u64, Vec<(Value, Value)>> {
-        &self.map
+    pub fn with_capacity(capacity: usize) -> Self {
+        Self {
+            indices: HashTable::with_capacity(capacity),
+            entries: Vec::with_capacity(capacity),
+        }
     }
 
     /// Creates a dict from a vector of (key, value) pairs.
@@ -58,7 +71,7 @@ impl Dict {
         heap: &mut Heap<impl ResourceTracker>,
         interns: &Interns,
     ) -> RunResult<Self> {
-        let mut dict = Self::new();
+        let mut dict = Self::with_capacity(pairs.len());
         let mut pairs_iter = pairs.into_iter();
         for (key, value) in pairs_iter.by_ref() {
             if let Err(err) = dict.set_transfer_ownership(key, value, heap, interns) {
@@ -83,40 +96,39 @@ impl Dict {
         value: Value,
         heap: &mut Heap<impl ResourceTracker>,
         interns: &Interns,
-    ) -> RunResult<Option<Value>> {
-        let Some(hash) = key.py_hash(heap, interns) else {
-            // Key is unhashable - clean up before returning error
-            let err = ExcType::type_error_unhashable(key.py_type(Some(heap)));
-            key.drop_with_heap(heap);
-            value.drop_with_heap(heap);
-            return Err(err);
+    ) -> RunResult<()> {
+        let (opt_index, hash) = match self.find_index_hash(&key, heap, interns) {
+            Ok((index, hash)) => (index, hash),
+            Err(err) => {
+                key.drop_with_heap(heap);
+                value.drop_with_heap(heap);
+                return Err(err);
+            }
         };
 
-        let bucket = self.map.entry(hash).or_default();
-
         // Check if key already exists in bucket
-        for (i, (k, _v)) in bucket.iter().enumerate() {
-            if k.py_eq(&key, heap, interns) {
-                // Key exists, replace in place to preserve insertion order
-                // Note: we don't decrement old value's refcount since this is a transfer
-                // and we don't increment new value's refcount either
-                let (_old_key, old_value) = std::mem::replace(&mut bucket[i], (key, value));
-                return Ok(Some(old_value));
-            }
+        if let Some(index) = opt_index {
+            // Key exists, replace in place to preserve insertion order
+            // Note: we don't decrement old value's refcount since this is a transfer
+            // and we don't increment new value's refcount either
+            let existing_bucket = &mut self.entries[index];
+            existing_bucket.value = value;
+        } else {
+            // Key doesn't exist, add new pair to indices and entries
+            let index = self.entries.len();
+            self.entries.push(DictEntry { key, value, hash });
+            self.indices
+                .insert_unique(hash, index, |index| self.entries[*index].hash);
         }
-
-        // Key doesn't exist, add new pair
-        bucket.push((key, value));
-        Ok(None)
+        Ok(())
     }
 
     fn drop_all_entries(&mut self, heap: &mut Heap<impl ResourceTracker>) {
-        for bucket in self.map.values_mut() {
-            for (key, value) in bucket.drain(..) {
-                key.drop_with_heap(heap);
-                value.drop_with_heap(heap);
-            }
+        for entry in self.entries.drain(..) {
+            entry.key.drop_with_heap(heap);
+            entry.value.drop_with_heap(heap);
         }
+        self.indices.clear();
     }
 
     /// Gets a value from the dict by key.
@@ -129,17 +141,11 @@ impl Dict {
         heap: &mut Heap<impl ResourceTracker>,
         interns: &Interns,
     ) -> RunResult<Option<&Value>> {
-        let hash = key
-            .py_hash(heap, interns)
-            .ok_or_else(|| ExcType::type_error_unhashable(key.py_type(Some(heap))))?;
-        if let Some(bucket) = self.map.get(&hash) {
-            for (k, v) in bucket {
-                if k.py_eq(key, heap, interns) {
-                    return Ok(Some(v));
-                }
-            }
+        if let Some(index) = self.find_index_hash(key, heap, interns)?.0 {
+            Ok(Some(&self.entries[index].value))
+        } else {
+            Ok(None)
         }
-        Ok(None)
     }
 
     /// Sets a key-value pair in the dict.
@@ -158,28 +164,25 @@ impl Dict {
         heap: &mut Heap<impl ResourceTracker>,
         interns: &Interns,
     ) -> RunResult<Option<Value>> {
-        let hash = key
-            .py_hash(heap, interns)
-            .ok_or_else(|| ExcType::type_error_unhashable(key.py_type(Some(heap))))?;
+        let (opt_index, hash) = self.find_index_hash(&key, heap, interns)?;
 
-        let bucket = self.map.entry(hash).or_default();
+        let entry = DictEntry { key, value, hash };
+        if let Some(index) = opt_index {
+            // Key exists, replace in place to preserve insertion order
+            let old_entry = std::mem::replace(&mut self.entries[index], entry);
 
-        // Check if key already exists in bucket
-        for (i, (k, _v)) in bucket.iter().enumerate() {
-            if k.py_eq(&key, heap, interns) {
-                // Key exists, replace in place to preserve insertion order within the bucket
-                let (old_key, old_value) = std::mem::replace(&mut bucket[i], (key, value));
-
-                // Decrement refcount for old key (we're discarding it)
-                old_key.drop_with_heap(heap);
-                // Transfer ownership of old_value to caller (no clone needed)
-                return Ok(Some(old_value));
-            }
+            // Decrement refcount for old key (we're discarding it)
+            old_entry.key.drop_with_heap(heap);
+            // Transfer ownership of the old value to caller (no clone needed)
+            Ok(Some(old_entry.value))
+        } else {
+            // Key doesn't exist, add new pair to indices and entries
+            let index = self.entries.len();
+            self.entries.push(entry);
+            self.indices
+                .insert_unique(hash, index, |index| self.entries[*index].hash);
+            Ok(None)
         }
-
-        // Key doesn't exist, add new pair (ownership transfer)
-        bucket.push((key, value));
-        Ok(None)
     }
 
     /// Removes and returns a key-value pair from the dict.
@@ -199,19 +202,20 @@ impl Dict {
             .py_hash(heap, interns)
             .ok_or_else(|| ExcType::type_error_unhashable(key.py_type(Some(heap))))?;
 
-        if let Some(bucket) = self.map.get_mut(&hash) {
-            for (i, (k, _v)) in bucket.iter().enumerate() {
-                if k.py_eq(key, heap, interns) {
-                    let (old_key, old_value) = bucket.swap_remove(i);
-                    if bucket.is_empty() {
-                        self.map.shift_remove(&hash);
-                    }
-                    // Don't decrement refcounts - caller now owns the values
-                    return Ok(Some((old_key, old_value)));
-                }
-            }
+        let entry = self.indices.entry(
+            hash,
+            |v| key.py_eq(&self.entries[*v].key, heap, interns),
+            |index| self.entries[*index].hash,
+        );
+
+        if let Entry::Occupied(occ_entry) = entry {
+            let entry = self.entries.remove(*occ_entry.get());
+            occ_entry.remove();
+            // Don't decrement refcounts - caller now owns the values
+            Ok(Some((entry.key, entry.value)))
+        } else {
+            Ok(None)
         }
-        Ok(None)
     }
 
     /// Returns a vector of all keys in the dict with proper reference counting.
@@ -220,13 +224,10 @@ impl Dict {
     /// now holds additional references to these values.
     #[must_use]
     pub fn keys(&self, heap: &mut Heap<impl ResourceTracker>) -> Vec<Value> {
-        let mut result = Vec::new();
-        for bucket in self.map.values() {
-            for (k, _v) in bucket {
-                result.push(k.clone_with_heap(heap));
-            }
-        }
-        result
+        self.entries
+            .iter()
+            .map(|entry| entry.key.clone_with_heap(heap))
+            .collect()
     }
 
     /// Returns a vector of all values in the dict with proper reference counting.
@@ -234,14 +235,11 @@ impl Dict {
     /// Each value's reference count is incremented since the returned vector
     /// now holds additional references to these values.
     #[must_use]
-    pub fn values_list(&self, heap: &mut Heap<impl ResourceTracker>) -> Vec<Value> {
-        let mut result = Vec::new();
-        for bucket in self.map.values() {
-            for (_k, v) in bucket {
-                result.push(v.clone_with_heap(heap));
-            }
-        }
-        result
+    pub fn values(&self, heap: &mut Heap<impl ResourceTracker>) -> Vec<Value> {
+        self.entries
+            .iter()
+            .map(|entry| entry.value.clone_with_heap(heap))
+            .collect()
     }
 
     /// Returns a vector of all (key, value) pairs in the dict with proper reference counting.
@@ -250,19 +248,16 @@ impl Dict {
     /// now holds additional references to these values.
     #[must_use]
     pub fn items(&self, heap: &mut Heap<impl ResourceTracker>) -> Vec<(Value, Value)> {
-        let mut result = Vec::new();
-        for bucket in self.map.values() {
-            for (k, v) in bucket {
-                result.push((k.clone_with_heap(heap), v.clone_with_heap(heap)));
-            }
-        }
-        result
+        self.entries
+            .iter()
+            .map(|entry| (entry.key.clone_with_heap(heap), entry.value.clone_with_heap(heap)))
+            .collect()
     }
 
     /// Returns the number of key-value pairs in the dict.
     #[must_use]
     pub fn len(&self) -> usize {
-        self.map.values().map(Vec::len).sum()
+        self.entries.len()
     }
 
     /// Returns true if the dict is empty.
@@ -271,12 +266,9 @@ impl Dict {
         self.len() == 0
     }
 
-    /// Returns an iterator over references to all (key, value) pairs in the dict.
-    ///
-    /// The iteration order follows insertion order (IndexMap semantics).
-    /// This does NOT increment reference counts - use `copy_for_extend` pattern if needed.
-    pub fn iter_pairs(&self) -> impl Iterator<Item = (&Value, &Value)> {
-        self.map.values().flatten().map(|(k, v)| (k, v))
+    /// Returns an iterator over references to (key, value) pairs.
+    pub fn iter(&self) -> DictIter<'_> {
+        self.into_iter()
     }
 
     /// Creates a deep clone of this dict with proper reference counting.
@@ -286,31 +278,18 @@ impl Dict {
     /// bypass reference counting.
     #[must_use]
     pub fn clone_with_heap(&self, heap: &mut Heap<impl ResourceTracker>) -> Self {
-        let mut new_map = IndexMap::new();
-        for (hash, bucket) in &self.map {
-            let new_bucket: Vec<(Value, Value)> = bucket
+        Self {
+            indices: self.indices.clone(),
+            entries: self
+                .entries
                 .iter()
-                .map(|(k, v)| (k.clone_with_heap(heap), v.clone_with_heap(heap)))
-                .collect();
-            new_map.insert(*hash, new_bucket);
+                .map(|entry| DictEntry {
+                    key: entry.key.clone_with_heap(heap),
+                    value: entry.value.clone_with_heap(heap),
+                    hash: entry.hash,
+                })
+                .collect(),
         }
-        Self { map: new_map }
-    }
-
-    /// Consumes the dict and returns a vector of all (key, value) pairs.
-    ///
-    /// Since ownership is just transferred, there should be no need to increment reference counts etc.
-    ///
-    /// TODO we should replace this with `into_iter` method to avoid intermediate allocation.
-    #[must_use]
-    pub fn into_vec(self) -> Vec<(Value, Value)> {
-        let mut result = Vec::new();
-        for (_, bucket) in self.map {
-            for (k, v) in bucket {
-                result.push((k, v));
-            }
-        }
-        result
     }
 
     /// Creates a dict from the `dict()` constructor call.
@@ -344,7 +323,7 @@ impl Dict {
 
                 // Copy all key-value pairs first (without incrementing refcounts)
                 let pairs: Vec<(Value, Value)> = dict
-                    .iter_pairs()
+                    .iter()
                     .map(|(k, v)| (k.copy_for_extend(), v.copy_for_extend()))
                     .collect();
 
@@ -364,6 +343,59 @@ impl Dict {
                 Ok(Value::Ref(result))
             }
         }
+    }
+
+    fn find_index_hash(
+        &self,
+        key: &Value,
+        heap: &mut Heap<impl ResourceTracker>,
+        interns: &Interns,
+    ) -> RunResult<(Option<usize>, u64)> {
+        let hash = key
+            .py_hash(heap, interns)
+            .ok_or_else(|| ExcType::type_error_unhashable(key.py_type(Some(heap))))?;
+
+        let opt_index = self
+            .indices
+            .find(hash, |v| key.py_eq(&self.entries[*v].key, heap, interns))
+            .copied();
+        Ok((opt_index, hash))
+    }
+}
+
+/// Iterator over borrowed (key, value) pairs in a dict.
+pub struct DictIter<'a>(std::slice::Iter<'a, DictEntry>);
+
+impl<'a> Iterator for DictIter<'a> {
+    type Item = (&'a Value, &'a Value);
+    fn next(&mut self) -> Option<Self::Item> {
+        self.0.next().map(|e| (&e.key, &e.value))
+    }
+}
+
+impl<'a> IntoIterator for &'a Dict {
+    type Item = (&'a Value, &'a Value);
+    type IntoIter = DictIter<'a>;
+    fn into_iter(self) -> Self::IntoIter {
+        DictIter(self.entries.iter())
+    }
+}
+
+/// Iterator over owned (key, value) pairs from a consumed dict.
+pub struct DictIntoIter(std::vec::IntoIter<DictEntry>);
+
+impl Iterator for DictIntoIter {
+    type Item = (Value, Value);
+    fn next(&mut self) -> Option<Self::Item> {
+        self.0.next().map(|e| (e.key, e.value))
+    }
+}
+
+impl IntoIterator for Dict {
+    type Item = (Value, Value);
+    type IntoIter = DictIntoIter;
+    fn into_iter(self) -> Self::IntoIter {
+        DictIntoIter(self.entries.into_iter())
     }
 }
 
@@ -387,34 +419,30 @@ impl PyTrait for Dict {
         }
 
         // Check that all keys in self exist in other with equal values
-        for bucket in self.map.values() {
-            for (k, v) in bucket {
-                match other.get(k, heap, interns) {
-                    Ok(Some(other_v)) => {
-                        if !v.py_eq(other_v, heap, interns) {
-                            return false;
-                        }
+        for entry in &self.entries {
+            match other.get(&entry.key, heap, interns) {
+                Ok(Some(other_v)) => {
+                    if !entry.value.py_eq(other_v, heap, interns) {
+                        return false;
                     }
-                    _ => return false,
                 }
+                _ => return false,
             }
         }
         true
     }
 
     fn py_dec_ref_ids(&mut self, stack: &mut Vec<HeapId>) {
-        for bucket in self.map.values_mut() {
-            for (key, value) in bucket {
-                if let Value::Ref(id) = key {
-                    stack.push(*id);
-                    #[cfg(feature = "dec-ref-check")]
-                    key.dec_ref_forget();
-                }
-                if let Value::Ref(id) = value {
-                    stack.push(*id);
-                    #[cfg(feature = "dec-ref-check")]
-                    value.dec_ref_forget();
-                }
+        for entry in &mut self.entries {
+            if let Value::Ref(id) = &entry.key {
+                stack.push(*id);
+                #[cfg(feature = "dec-ref-check")]
+                entry.key.dec_ref_forget();
+            }
+            if let Value::Ref(id) = &entry.value {
+                stack.push(*id);
+                #[cfg(feature = "dec-ref-check")]
+                entry.value.dec_ref_forget();
             }
         }
     }
@@ -436,16 +464,14 @@ impl PyTrait for Dict {
 
         f.write_char('{')?;
         let mut first = true;
-        for bucket in self.map.values() {
-            for (k, v) in bucket {
-                if !first {
-                    f.write_str(", ")?;
-                }
-                first = false;
-                k.py_repr_fmt(f, heap, heap_ids, interns)?;
-                f.write_str(": ")?;
-                v.py_repr_fmt(f, heap, heap_ids, interns)?;
+        for entry in &self.entries {
+            if !first {
+                f.write_str(", ")?;
             }
+            first = false;
+            entry.key.py_repr_fmt(f, heap, heap_ids, interns)?;
+            f.write_str(": ")?;
+            entry.value.py_repr_fmt(f, heap, heap_ids, interns)?;
         }
         f.write_char('}')
     }
@@ -518,7 +544,7 @@ impl PyTrait for Dict {
             }
             Attr::Values => {
                 args.check_zero_args("dict.values")?;
-                let values = self.values_list(heap);
+                let values = self.values(heap);
                 let list_id = heap.allocate(HeapData::List(List::new(values)))?;
                 Ok(Value::Ref(list_id))
             }

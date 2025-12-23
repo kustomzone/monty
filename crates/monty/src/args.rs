@@ -187,8 +187,6 @@ impl KwargsValues {
                 })
                 .collect(),
             KwargsValues::Dict(dict) => dict
-                // TODO we should use an into_iter type on dict to avoid intermediate allocation
-                .into_vec()
                 .into_iter()
                 .map(|(k, v)| (PyObject::new(k, heap, interns), PyObject::new(v, heap, interns)))
                 .collect(),
@@ -205,7 +203,7 @@ impl KwargsValues {
                 }
             }
             Self::Dict(dict) => {
-                for (k, v) in dict.into_vec() {
+                for (k, v) in dict {
                     k.drop_with_heap(heap);
                     v.drop_with_heap(heap);
                 }
@@ -222,7 +220,7 @@ impl IntoIterator for KwargsValues {
         match self {
             Self::Empty => KwargsValuesIter::Empty,
             Self::Inline(kvs) => KwargsValuesIter::Inline(kvs.into_iter()),
-            Self::Dict(dict) => KwargsValuesIter::Dict(dict.into_vec().into_iter()),
+            Self::Dict(dict) => KwargsValuesIter::Dict(dict.into_iter().collect::<Vec<_>>().into_iter()),
         }
     }
 }
