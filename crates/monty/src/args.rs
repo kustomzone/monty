@@ -1,14 +1,15 @@
 use std::vec::IntoIter;
 
 use crate::{
-    exceptions::ExcType,
+    exception::ExcType,
     expressions::{ExprLoc, Identifier},
     heap::Heap,
     intern::{Interns, StringId},
+    parse::ParseError,
     run_frame::RunResult,
     types::Dict,
     value::Value,
-    ParseError, PyObject, ResourceTracker,
+    PyObject, ResourceTracker,
 };
 
 /// Type for method call arguments.
@@ -280,10 +281,6 @@ pub enum ArgExprs {
 }
 
 impl ArgExprs {
-    pub fn new(args: Vec<ExprLoc>, kwargs: Vec<Kwarg>) -> Self {
-        Self::new_with_var_kwargs(args, None, kwargs, None)
-    }
-
     /// Creates a new `ArgExprs` with optional `*args` and `**kwargs` unpacking expressions.
     ///
     /// This is used when parsing function calls that may include `*expr` / `**expr`

@@ -6,7 +6,7 @@ use std::hash::{Hash, Hasher};
 use ahash::AHashSet;
 
 use crate::args::ArgValues;
-use crate::exceptions::ExcType;
+use crate::exception::ExcType;
 use crate::intern::{FunctionId, Interns};
 use crate::resource::{ResourceError, ResourceTracker};
 use crate::run_frame::RunResult;
@@ -318,7 +318,7 @@ impl PyTrait for HeapData {
             Self::List(l) => l.py_getitem(key, heap, interns),
             Self::Tuple(t) => t.py_getitem(key, heap, interns),
             Self::Dict(d) => d.py_getitem(key, heap, interns),
-            _ => Err(crate::exceptions::ExcType::type_error_not_sub(self.py_type(Some(heap)))),
+            _ => Err(ExcType::type_error_not_sub(self.py_type(Some(heap)))),
         }
     }
 
@@ -335,9 +335,7 @@ impl PyTrait for HeapData {
             Self::List(l) => l.py_setitem(key, value, heap, interns),
             Self::Tuple(t) => t.py_setitem(key, value, heap, interns),
             Self::Dict(d) => d.py_setitem(key, value, heap, interns),
-            _ => Err(crate::exceptions::ExcType::type_error_not_sub_assignment(
-                self.py_type(Some(heap)),
-            )),
+            _ => Err(ExcType::type_error_not_sub_assignment(self.py_type(Some(heap)))),
         }
     }
 }

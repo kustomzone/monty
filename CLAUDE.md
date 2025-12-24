@@ -107,8 +107,8 @@ Each `assert` should have a descriptive message.
 
 Only create a separate test file when you MUST use one of these special expectation formats:
 
-- `# Raise=Exception('message')` - Test expects an exception (execution stops)
-- `# ParseError=message` - Test expects a parse error
+- `"""TRACEBACK:..."""` - Test expects an exception with full traceback (PREFERRED for error tests)
+- `# Raise=Exception('message')` - Test expects an exception without traceback verification
 - `# ref-counts={...}` - Test checks reference counts (special mode)
 - you're writing tests for a different behavior or section of the language
 
@@ -127,22 +127,59 @@ Only use these when `assert` won't work (on last line of file):
 - `# Return=value` - Check `repr()` output (prefer assert instead)
 - `# Return.str=value` - Check `str()` output (prefer assert instead)
 - `# Return.type=typename` - Check `type()` output (prefer assert instead)
-- `# Raise=Exception('message')` - Expect exception (REQUIRES separate file)
-- `# ParseError=message` - Expect parse error (REQUIRES separate file)
+- `# Raise=Exception('message')` - Expect exception without traceback (REQUIRES separate file)
+- `"""TRACEBACK:..."""` - Expect exception with full traceback (PREFERRED over `# Raise=`)
 - `# ref-counts={...}` - Check reference counts (REQUIRES separate file)
 - No expectation comment - Assert-based test (PREFERRED)
 
 Do NOT use `# Return=` when you could use `assert` instead
 
-### Skip Directive
+### Traceback Tests (Preferred for Errors)
 
-NEVER SKIP TESTS UNLESS ABSOLUTELY NECESSARY AND EXPLICITLY APPROVED BY ME!!!
+For tests that expect exceptions, **prefer traceback tests over `# Raise=`** because they verify:
+- The full traceback with all stack frames
+- Correct line numbers for each frame
+- Function names in the traceback
+- The caret markers (`~`) pointing to the error location
+
+Traceback test format - add a triple-quoted string at the end of the file starting with `\nTRACEBACK:`:
+```python
+def foo():
+    raise ValueError('oops')
+
+foo()
+"""
+TRACEBACK:
+Traceback (most recent call last):
+  File "my_test.py", line 4, in <module>
+    foo()
+    ~~~~~
+  File "my_test.py", line 2, in foo
+    raise ValueError('oops')
+ValueError: oops
+"""
+```
+
+Key points:
+- The filename in the traceback should match the test file name (just the basename, not the full path)
+- Use `~` for caret markers (the test runner normalizes CPython's `^` to `~`)
+- The `<module>` frame name is used for top-level code
+- Tests run against both Monty and CPython, so the traceback must match both
+
+Only use `# Raise=` when you only care about the exception type/message and not the traceback.
+
+### Xfail Directive (Strict)
+
+NEVER MARK TESTS AS XFAIL UNDER ANY CIRCUMSTANCES!!!
 
 Optional, on first line of file - DO NOT use unless absolutely necessary:
-- `# skip=cpython` - Skip CPython test (only run on Monty)
-- `# skip=monty` - Skip Monty test (only run on CPython)
+- `# xfail=cpython` - Test is expected to fail on CPython (if it passes, that's an error)
+- `# xfail=monty` - Test is expected to fail on Monty (if it passes, that's an error)
 
-NEVER SKIP TESTS UNLESS ABSOLUTELY NECESSARY AND EXPLICITLY APPROVED BY ME!!!
+Xfail is **strict**: if a test marked xfail passes, the test runner will fail with an error
+telling you to remove xfail since the test is now fixed.
+
+NEVER MARK TESTS AS XFAIL UNDER ANY CIRCUMSTANCES!!!
 
 ### Other Notes
 

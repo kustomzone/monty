@@ -1,26 +1,19 @@
-use monty::exceptions::ExcType;
-use monty::{Executor, ParseError};
+use monty::{ExcType, Executor, PythonException};
 
 /// Tests that unimplemented features return `NotImplementedError` exceptions.
 mod not_implemented_error {
     use super::*;
 
     /// Helper to extract the exception type from a parse error.
-    fn get_exc_type(result: Result<Executor, ParseError>) -> ExcType {
+    fn get_exc_type(result: Result<Executor, PythonException>) -> ExcType {
         let err = result.expect_err("expected parse error");
-        match err {
-            ParseError::PreEvalExc(exc) => exc.exc.exc_type(),
-            other => panic!("expected PreEvalExc, got: {other}"),
-        }
+        err.exc_type
     }
 
     /// Helper to extract the exception message from a parse error.
-    fn get_exc_message(result: Result<Executor, ParseError>) -> String {
+    fn get_exc_message(result: Result<Executor, PythonException>) -> String {
         let err = result.expect_err("expected parse error");
-        match err {
-            ParseError::PreEvalExc(exc) => exc.exc.arg().map_or(String::new(), std::string::ToString::to_string),
-            other => panic!("expected PreEvalExc, got: {other}"),
-        }
+        err.message.unwrap_or_default()
     }
 
     #[test]
@@ -104,12 +97,9 @@ mod syntax_error {
     use super::*;
 
     /// Helper to extract the exception type from a parse error.
-    fn get_exc_type(result: Result<Executor, ParseError>) -> ExcType {
+    fn get_exc_type(result: Result<Executor, PythonException>) -> ExcType {
         let err = result.expect_err("expected parse error");
-        match err {
-            ParseError::PreEvalExc(exc) => exc.exc.exc_type(),
-            other => panic!("expected PreEvalExc, got: {other}"),
-        }
+        err.exc_type
     }
 
     #[test]
@@ -130,8 +120,8 @@ mod syntax_error {
         let err = result.expect_err("expected parse error");
         let display = err.to_string();
         assert!(
-            display.starts_with("SyntaxError:"),
-            "display should start with 'SyntaxError:', got: {display}"
+            display.contains("SyntaxError:"),
+            "display should contain 'SyntaxError:', got: {display}"
         );
     }
 }

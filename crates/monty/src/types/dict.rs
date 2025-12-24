@@ -5,7 +5,7 @@ use hashbrown::hash_table::Entry;
 use hashbrown::HashTable;
 
 use crate::args::ArgValues;
-use crate::exceptions::ExcType;
+use crate::exception::ExcType;
 use crate::types::Type;
 
 use super::{List, PyTrait, Tuple};

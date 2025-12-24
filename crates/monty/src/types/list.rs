@@ -3,7 +3,7 @@ use std::fmt::Write;
 use ahash::AHashSet;
 
 use crate::args::ArgValues;
-use crate::exceptions::ExcType;
+use crate::exception::ExcType;
 use crate::for_iterator::ForIterator;
 use crate::types::Type;
 

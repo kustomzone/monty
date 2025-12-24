@@ -4,7 +4,7 @@
 //! and can be used in Python code execution.
 
 use indexmap::IndexMap;
-use monty::{exceptions::ExcType, Executor, PyObject, RunError};
+use monty::{ExcType, Executor, PyObject};
 
 // === Immediate Value Tests ===
 
@@ -270,10 +270,9 @@ fn input_exception_raise() {
         exc_type: ExcType::ValueError,
         arg: Some("input error".to_string()),
     }]);
-    match result.unwrap_err() {
-        RunError::Exc(exc) => assert_eq!(exc.exc.to_string(), "ValueError('input error')"),
-        err => panic!("expected exception not: {err:?}"),
-    }
+    let exc = result.unwrap_err();
+    assert_eq!(exc.exc_type, ExcType::ValueError);
+    assert_eq!(exc.message, Some("input error".to_string()));
 }
 
 // === Invalid Input Tests ===

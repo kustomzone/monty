@@ -1,18 +1,35 @@
 use ahash::AHashMap;
-use monty::{ExecProgress, Executor, ExecutorIter, ParseError, PyObject, RunError, StdPrint};
+use monty::{ExecProgress, Executor, ExecutorIter, PyObject, PythonException, ResourceLimits, StdPrint};
 use pyo3::prelude::*;
 use std::error::Error;
 use std::fs;
 use std::path::Path;
 
-/// Specifies which interpreters a test should skip and the execution mode.
+/// Recursion limit for test execution.
 ///
-/// Parsed from an optional first-line comment like `# skip=monty,cpython` or `# mode: iter`.
+/// Used for both Monty and CPython tests. CPython needs ~5 extra frames
+/// for runpy overhead, which is added in run_file_and_get_traceback.
+///
+/// NOTE this value is chosen to avoid both:
+/// * other recursion errors in python (if it's too low)
+/// * and, stack overflows in debug rust (if it's too high)
+const TEST_RECURSION_LIMIT: usize = 50;
+
+/// Test configuration parsed from directive comments.
+///
+/// Parsed from an optional first-line comment like `# xfail=monty,cpython` or `# mode: iter`.
 /// If not present, defaults to running on both interpreters in standard mode.
+///
+/// ## Xfail Semantics (Strict)
+/// - `xfail=monty` - Test is expected to fail on Monty; if it passes, that's an error
+/// - `xfail=cpython` - Test is expected to fail on CPython; if it passes, that's an error
+/// - `xfail=monty,cpython` - Expected to fail on both interpreters
 #[derive(Debug, Clone, Default)]
-struct TestSkips {
-    monty: bool,
-    cpython: bool,
+struct TestConfig {
+    /// When true, test is expected to fail on Monty (strict xfail).
+    xfail_monty: bool,
+    /// When true, test is expected to fail on CPython (strict xfail).
+    xfail_cpython: bool,
     /// When true, use ExecutorIter with external function support instead of Executor.
     iter_mode: bool,
 }
@@ -20,10 +37,8 @@ struct TestSkips {
 /// Represents the expected outcome of a test fixture
 #[derive(Debug, Clone)]
 enum Expectation {
-    /// Expect exception with specific message
+    /// Expect exception (parse-time or runtime) with specific message
     Raise(String),
-    /// Expect parse error containing message
-    ParseError(String),
     /// Expect successful execution, check py_str() output
     ReturnStr(String),
     /// Expect successful execution, check py_repr() output
@@ -33,6 +48,9 @@ enum Expectation {
     /// Expect successful execution, check ref counts of named variables.
     /// Only used when `ref-counting` feature is enabled; skipped otherwise.
     RefCounts(#[cfg_attr(not(feature = "ref-counting"), allow(dead_code))] AHashMap<String, usize>),
+    /// Expect exception with full traceback comparison.
+    /// The expected traceback string should match exactly between Monty and CPython.
+    Traceback(String),
     /// Expect successful execution without raising an exception (no return value check).
     /// Used for tests that rely on asserts or just verify code runs.
     NoException,
@@ -43,75 +61,86 @@ impl Expectation {
     fn expected_value(&self) -> &str {
         match self {
             Expectation::Raise(s)
-            | Expectation::ParseError(s)
             | Expectation::ReturnStr(s)
             | Expectation::Return(s)
-            | Expectation::ReturnType(s) => s,
+            | Expectation::ReturnType(s)
+            | Expectation::Traceback(s) => s,
             Expectation::RefCounts(_) | Expectation::NoException => "",
         }
     }
 }
 
-/// Parse a Python fixture file into code, expected outcome, and test skips.
+/// Parse a Python fixture file into code, expected outcome, and test configuration.
 ///
-/// The file may optionally start with a `# skip=monty,cpython` comment to specify
-/// which interpreters to skip. If not present, defaults to running on both.
+/// The file may optionally start with a `# xfail=monty,cpython` comment to specify
+/// which interpreters the test is expected to fail on. If not present, defaults to
+/// running on both and expecting success.
 ///
 /// The file may have an expectation comment as the LAST line:
-/// - `# Raise=ExceptionType('message')` - Exception format
-/// - `# ParseError=message` - Parse error format
+/// - `# Raise=ExceptionType('message')` - Exception (parse-time or runtime)
 /// - `# Return.str=value` - Check py_str() output
 /// - `# Return=value` - Check py_repr() output
 /// - `# Return.type=typename` - Check py_type() output
 /// - `# ref-counts={'var': count, ...}` - Check ref counts of named heap variables
 ///
+/// Or a traceback expectation as a triple-quoted string at the end (uses actual test filename):
+/// ```text
+/// """TRACEBACK:
+/// Traceback (most recent call last):
+///   File "my_test.py", line 4, in <module>
+///     foo()
+/// ValueError: message
+/// """
+/// ```
+///
 /// If no expectation comment is present, the test just verifies the code runs without exception.
-fn parse_fixture(content: &str) -> (String, Expectation, TestSkips) {
+fn parse_fixture(content: &str) -> (String, Expectation, TestConfig) {
     let lines: Vec<&str> = content.lines().collect();
 
     assert!(!lines.is_empty(), "Empty fixture file");
 
     // Check for directives at the start of the file
-    // Supports: # skip=monty,cpython and # mode: iter (can be combined on same line)
-    let (skips, code_start_idx) = if let Some(first_line) = lines.first() {
-        let mut skips = TestSkips::default();
-        let mut has_directive = false;
+    // Supports: # xfail=monty,cpython and # mode: iter (can be combined on same line)
+    // Note: Directive lines are kept in the code (they're Python comments) to preserve line numbers
+    let (config, code_start_idx) = if let Some(first_line) = lines.first() {
+        let mut config = TestConfig::default();
 
         // Check for mode: iter directive
         if first_line.contains("mode: iter") {
-            skips.iter_mode = true;
-            // iter mode implicitly skips cpython (no external functions there)
-            skips.cpython = true;
-            has_directive = true;
+            config.iter_mode = true;
+            // iter mode implicitly xfails cpython (no external functions there)
+            config.xfail_cpython = true;
         }
 
-        // Check for skip= directive
-        if let Some(skip_idx) = first_line.find("skip=") {
-            let skip_str = &first_line[skip_idx + 5..];
+        // Check for xfail= directive
+        if let Some(xfail_idx) = first_line.find("xfail=") {
+            let xfail_str = &first_line[xfail_idx + 6..];
             // Parse until whitespace or end of line
-            let skip_end = skip_str.find(|c: char| c.is_whitespace()).unwrap_or(skip_str.len());
-            let skip_str = &skip_str[..skip_end];
-            skips.monty = skip_str.contains("monty");
-            if skip_str.contains("cpython") {
-                skips.cpython = true;
+            let xfail_end = xfail_str.find(|c: char| c.is_whitespace()).unwrap_or(xfail_str.len());
+            let xfail_str = &xfail_str[..xfail_end];
+            config.xfail_monty = xfail_str.contains("monty");
+            if xfail_str.contains("cpython") {
+                config.xfail_cpython = true;
             }
-            has_directive = true;
         }
 
-        let code_start = usize::from(has_directive && first_line.starts_with('#'));
-        (skips, code_start)
+        (config, 0)
     } else {
-        (TestSkips::default(), 0)
+        (TestConfig::default(), 0)
     };
 
     // Check if first code line has an expectation (this is an error)
     if let Some(first_code_line) = lines.get(code_start_idx) {
-        if first_code_line.starts_with("# Return")
-            || first_code_line.starts_with("# Raise")
-            || first_code_line.starts_with("# ParseError")
-        {
-            panic!("Expectation comment must be on the LAST line, not the first line");
-        }
+        assert!(
+            !(first_code_line.starts_with("# Return") || first_code_line.starts_with("# Raise")),
+            "Expectation comment must be on the LAST line, not the first line"
+        );
+    }
+
+    // Check for TRACEBACK expectation (triple-quoted string at end of file)
+    // Format: """TRACEBACK:\n...\n"""
+    if let Some((code, traceback)) = parse_traceback_expectation(content, code_start_idx) {
+        return (code, Expectation::Traceback(traceback), config);
     }
 
     // Get the last line and check if it's an expectation comment
@@ -144,20 +173,44 @@ fn parse_fixture(content: &str) -> (String, Expectation, TestSkips) {
             Expectation::Raise(expected.to_string()),
             &lines[code_start_idx..lines.len() - 1],
         )
-    } else if let Some(expected) = last_line.strip_prefix("# ParseError=") {
-        (
-            Expectation::ParseError(expected.to_string()),
-            &lines[code_start_idx..lines.len() - 1],
-        )
     } else {
         // No expectation comment - just run and check it doesn't raise
         (Expectation::NoException, &lines[code_start_idx..])
     };
 
-    // Code is everything except the skip comment (and expectation comment if present)
+    // Code is everything except the directive comment (and expectation comment if present)
     let code = code_lines.join("\n");
 
-    (code, expectation, skips)
+    (code, expectation, config)
+}
+
+/// Parses a TRACEBACK expectation from the end of a fixture file.
+///
+/// Looks for a triple-quoted string starting with `"""TRACEBACK:` at the end of the file.
+/// Returns `Some((code, expected_traceback))` if found, `None` otherwise.
+///
+/// The traceback string should contain the full expected output including the
+/// "Traceback (most recent call last):" header and the exception line.
+fn parse_traceback_expectation(content: &str, code_start_idx: usize) -> Option<(String, String)> {
+    // Format: """\nTRACEBACK:\n...\n"""
+    const MARKER: &str = "\"\"\"\nTRACEBACK:\n";
+
+    // Find the TRACEBACK marker
+    let marker_pos = content.find(MARKER)?;
+
+    // Extract the code before the marker
+    let code_part = &content[..marker_pos];
+    let lines: Vec<&str> = code_part.lines().collect();
+    let code = lines[code_start_idx..].join("\n").trim_end().to_string();
+
+    // Extract the traceback content between the markers
+    let after_marker = &content[marker_pos + MARKER.len()..];
+
+    // Find the closing triple quotes (preceded by newline)
+    let end_pos = after_marker.find("\n\"\"\"")?;
+    let traceback_content = &after_marker[..end_pos];
+
+    Some((code, traceback_content.to_string()))
 }
 
 /// Parses the ref-counts format: {'var': count, 'var2': count2}
@@ -222,17 +275,36 @@ fn dispatch_external_call(name: &str, args: Vec<PyObject>) -> PyObject {
     }
 }
 
-/// Run a test with the given code and expectation
+/// Represents a test failure with details about expected vs actual values.
+#[derive(Debug)]
+struct TestFailure {
+    test_name: String,
+    kind: String,
+    expected: String,
+    actual: String,
+}
+
+impl std::fmt::Display for TestFailure {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(
+            f,
+            "[{}] {} mismatch\n  expected: {}\n  actual: {}",
+            self.test_name, self.kind, self.expected, self.actual
+        )
+    }
+}
+
+/// Try to run a test, returning Ok(()) on success or Err with failure details.
 ///
 /// This function executes Python code via the Executor and validates the result
 /// against the expected outcome specified in the fixture.
-fn run_test(path: &Path, code: &str, expectation: Expectation) {
+fn try_run_test(path: &Path, code: &str, expectation: &Expectation) -> Result<(), TestFailure> {
     let test_name = path.strip_prefix("test_cases/").unwrap_or(path).display().to_string();
 
     // Handle ref-counting tests separately since they need run_ref_counts()
     #[cfg(feature = "ref-counting")]
-    if let Expectation::RefCounts(expected) = &expectation {
-        match Executor::new(code, "test.py", &[]) {
+    if let Expectation::RefCounts(expected) = expectation {
+        match Executor::new(code, &test_name, &[]) {
             Ok(ex) => {
                 let result = ex.run_ref_counts(vec![]);
                 match result {
@@ -243,40 +315,83 @@ fn run_test(path: &Path, code: &str, expectation: Expectation) {
                         ..
                     }) => {
                         // Strict matching: verify all heap objects are accounted for by variables
-                        assert_eq!(
-                            unique_refs, heap_count,
-                            "[{test_name}] Strict matching failed: {heap_count} heap objects exist, \
-                             but only {unique_refs} are referenced by variables.\n\
-                             Actual ref counts: {counts:?}"
-                        );
-                        assert_eq!(&counts, expected, "[{test_name}] ref-counts mismatch");
+                        if unique_refs != heap_count {
+                            return Err(TestFailure {
+                                test_name,
+                                kind: "Strict matching".to_string(),
+                                expected: format!("{heap_count} heap objects"),
+                                actual: format!("{unique_refs} referenced by variables, counts: {counts:?}"),
+                            });
+                        }
+                        if &counts != expected {
+                            return Err(TestFailure {
+                                test_name,
+                                kind: "ref-counts".to_string(),
+                                expected: format!("{expected:?}"),
+                                actual: format!("{counts:?}"),
+                            });
+                        }
+                        return Ok(());
                     }
-                    Err(e) => panic!("[{test_name}] Runtime error:\n{e}"),
+                    Err(e) => {
+                        return Err(TestFailure {
+                            test_name,
+                            kind: "Runtime".to_string(),
+                            expected: "success".to_string(),
+                            actual: e.to_string(),
+                        });
+                    }
                 }
             }
             Err(parse_err) => {
-                panic!("[{test_name}] Unexpected parse error: {parse_err:?}");
+                return Err(TestFailure {
+                    test_name,
+                    kind: "Parse".to_string(),
+                    expected: "success".to_string(),
+                    actual: parse_err.to_string(),
+                });
             }
         }
-        return;
     }
 
-    match Executor::new(code, "test.py", &[]) {
+    match Executor::new(code, &test_name, &[]) {
         Ok(ex) => {
-            let result = ex.run_no_limits(vec![]);
+            let limits = ResourceLimits::new().max_recursion_depth(Some(TEST_RECURSION_LIMIT));
+            let result = ex.run_with_limits(vec![], limits);
             match result {
                 Ok(obj) => match expectation {
                     Expectation::ReturnStr(expected) => {
                         let output = obj.to_string();
-                        assert_eq!(output, expected, "[{test_name}] str() mismatch");
+                        if output != *expected {
+                            return Err(TestFailure {
+                                test_name,
+                                kind: "str()".to_string(),
+                                expected: expected.clone(),
+                                actual: output,
+                            });
+                        }
                     }
                     Expectation::Return(expected) => {
                         let output = obj.py_repr();
-                        assert_eq!(output, expected, "[{test_name}] py_repr() mismatch");
+                        if output != *expected {
+                            return Err(TestFailure {
+                                test_name,
+                                kind: "py_repr()".to_string(),
+                                expected: expected.clone(),
+                                actual: output,
+                            });
+                        }
                     }
                     Expectation::ReturnType(expected) => {
                         let output = obj.type_name();
-                        assert_eq!(output, expected, "[{test_name}] type_name() mismatch");
+                        if output != expected {
+                            return Err(TestFailure {
+                                test_name,
+                                kind: "type_name()".to_string(),
+                                expected: expected.clone(),
+                                actual: output.to_string(),
+                            });
+                        }
                     }
                     #[cfg(not(feature = "ref-counting"))]
                     Expectation::RefCounts(_) => {
@@ -285,118 +400,228 @@ fn run_test(path: &Path, code: &str, expectation: Expectation) {
                     Expectation::NoException => {
                         // Success - code ran without exception as expected
                     }
-                    _ => panic!("[{test_name}] Expected return, got different expectation type"),
+                    Expectation::Raise(expected) | Expectation::Traceback(expected) => {
+                        return Err(TestFailure {
+                            test_name,
+                            kind: "Exception".to_string(),
+                            expected: expected.clone(),
+                            actual: "no exception raised".to_string(),
+                        });
+                    }
+                    #[cfg(feature = "ref-counting")]
+                    Expectation::RefCounts(_) => unreachable!(),
                 },
                 Err(e) => {
                     if let Expectation::Raise(expected) = expectation {
-                        // Extract just the exception part without traceback
-                        let output = match &e {
-                            RunError::Exc(exc) => exc.exc.to_string(),
-                            RunError::Internal(internal) => internal.to_string(),
-                            RunError::Resource(res) => res.to_string(),
-                        };
-                        assert_eq!(output, expected, "[{test_name}] Exception mismatch");
+                        let output = e.py_repr();
+                        if output != *expected {
+                            return Err(TestFailure {
+                                test_name,
+                                kind: "Exception".to_string(),
+                                expected: expected.clone(),
+                                actual: output,
+                            });
+                        }
+                    } else if let Expectation::Traceback(expected) = expectation {
+                        let output = e.to_string();
+                        if output != *expected {
+                            return Err(TestFailure {
+                                test_name,
+                                kind: "Traceback".to_string(),
+                                expected: expected.clone(),
+                                actual: output,
+                            });
+                        }
                     } else {
-                        panic!("[{test_name}] Unexpected error:\n{e}");
+                        return Err(TestFailure {
+                            test_name,
+                            kind: "Unexpected error".to_string(),
+                            expected: "success".to_string(),
+                            actual: e.to_string(),
+                        });
                     }
                 }
             }
         }
         Err(parse_err) => {
-            if let Expectation::ParseError(expected) = expectation {
-                // Format the parse error for comparison with test expectations
-                let err_msg = match &parse_err {
-                    ParseError::PreEvalExc(exc) => format!("Exc: {}", exc.summary()),
-                    ParseError::Internal(s) => format!("Internal: {s}"),
-                    ParseError::PreEvalInternal(s) => format!("Eval Internal: {s}"),
-                    ParseError::PreEvalResource(s) => format!("Resource: {s}"),
-                };
-                assert_eq!(err_msg, expected, "[{test_name}] Parse error mismatch");
+            if let Expectation::Raise(expected) = expectation {
+                let output = parse_err.py_repr();
+                if output != *expected {
+                    return Err(TestFailure {
+                        test_name,
+                        kind: "Parse error".to_string(),
+                        expected: expected.clone(),
+                        actual: output,
+                    });
+                }
+            } else if let Expectation::Traceback(expected) = expectation {
+                let output = parse_err.to_string();
+                if output != *expected {
+                    return Err(TestFailure {
+                        test_name,
+                        kind: "Traceback".to_string(),
+                        expected: expected.clone(),
+                        actual: output,
+                    });
+                }
             } else {
-                panic!("[{test_name}] Unexpected parse error: {parse_err:?}");
+                return Err(TestFailure {
+                    test_name,
+                    kind: "Unexpected parse error".to_string(),
+                    expected: "success".to_string(),
+                    actual: parse_err.to_string(),
+                });
             }
         }
     }
+    Ok(())
 }
 
-/// Run a test using ExecutorIter with external function support.
+/// Try to run a test using ExecutorIter with external function support.
 ///
 /// This function handles tests marked with `# mode: iter` directive by using the
 /// iterative executor API and providing implementations for predefined external functions.
-fn run_iter_test(path: &Path, code: &str, expectation: Expectation) {
+fn try_run_iter_test(path: &Path, code: &str, expectation: &Expectation) -> Result<(), TestFailure> {
     let test_name = path.strip_prefix("test_cases/").unwrap_or(path).display().to_string();
 
     // Ref-counting tests not supported in iter mode
     #[cfg(feature = "ref-counting")]
     if matches!(expectation, Expectation::RefCounts(_)) {
-        panic!("[{test_name}] ref-counts tests are not supported in iter mode");
+        return Err(TestFailure {
+            test_name,
+            kind: "Configuration".to_string(),
+            expected: "non-refcount test".to_string(),
+            actual: "ref-counts tests are not supported in iter mode".to_string(),
+        });
     }
 
     let ext_functions: Vec<String> = ITER_EXT_FUNCTIONS.iter().copied().map(str::to_string).collect();
 
-    let exec = match ExecutorIter::new(code, "test.py", &[], ext_functions) {
+    let exec = match ExecutorIter::new(code, &test_name, &[], ext_functions) {
         Ok(e) => e,
         Err(parse_err) => {
-            if let Expectation::ParseError(expected) = expectation {
-                let err_msg = match &parse_err {
-                    ParseError::PreEvalExc(exc) => format!("Exc: {}", exc.summary()),
-                    ParseError::Internal(s) => format!("Internal: {s}"),
-                    ParseError::PreEvalInternal(s) => format!("Eval Internal: {s}"),
-                    ParseError::PreEvalResource(s) => format!("Resource: {s}"),
-                };
-                assert_eq!(err_msg, expected, "[{test_name}] Parse error mismatch");
-                return;
+            if let Expectation::Raise(expected) = expectation {
+                let output = parse_err.py_repr();
+                if output != *expected {
+                    return Err(TestFailure {
+                        test_name,
+                        kind: "Parse error".to_string(),
+                        expected: expected.clone(),
+                        actual: output,
+                    });
+                }
+                return Ok(());
+            } else if let Expectation::Traceback(expected) = expectation {
+                let output = parse_err.to_string();
+                if output != *expected {
+                    return Err(TestFailure {
+                        test_name,
+                        kind: "Traceback".to_string(),
+                        expected: expected.clone(),
+                        actual: output,
+                    });
+                }
+                return Ok(());
             }
-            panic!("[{test_name}] Unexpected parse error: {parse_err:?}");
+            return Err(TestFailure {
+                test_name,
+                kind: "Unexpected parse error".to_string(),
+                expected: "success".to_string(),
+                actual: parse_err.to_string(),
+            });
         }
     };
 
     // Run execution loop, handling external function calls until complete
     let result = run_iter_loop(exec);
 
-    // Validate result against expectation
     match result {
         Ok(obj) => match expectation {
             Expectation::ReturnStr(expected) => {
                 let output = obj.to_string();
-                assert_eq!(output, expected, "[{test_name}] str() mismatch");
+                if output != *expected {
+                    return Err(TestFailure {
+                        test_name,
+                        kind: "str()".to_string(),
+                        expected: expected.clone(),
+                        actual: output,
+                    });
+                }
             }
             Expectation::Return(expected) => {
                 let output = obj.py_repr();
-                assert_eq!(output, expected, "[{test_name}] py_repr() mismatch");
+                if output != *expected {
+                    return Err(TestFailure {
+                        test_name,
+                        kind: "py_repr()".to_string(),
+                        expected: expected.clone(),
+                        actual: output,
+                    });
+                }
             }
             Expectation::ReturnType(expected) => {
                 let output = obj.type_name();
-                assert_eq!(output, expected, "[{test_name}] type_name() mismatch");
+                if output != expected {
+                    return Err(TestFailure {
+                        test_name,
+                        kind: "type_name()".to_string(),
+                        expected: expected.clone(),
+                        actual: output.to_string(),
+                    });
+                }
             }
             #[cfg(not(feature = "ref-counting"))]
             Expectation::RefCounts(_) => {}
             Expectation::NoException => {}
-            Expectation::Raise(_) => {
-                panic!("[{test_name}] Expected exception but code completed normally");
+            Expectation::Raise(expected) | Expectation::Traceback(expected) => {
+                return Err(TestFailure {
+                    test_name,
+                    kind: "Exception".to_string(),
+                    expected: expected.clone(),
+                    actual: "no exception raised".to_string(),
+                });
             }
-            Expectation::ParseError(_) => unreachable!(),
             #[cfg(feature = "ref-counting")]
             Expectation::RefCounts(_) => unreachable!(),
         },
         Err(e) => {
             if let Expectation::Raise(expected) = expectation {
-                let output = match &e {
-                    RunError::Exc(exc) => exc.exc.to_string(),
-                    RunError::Internal(internal) => internal.to_string(),
-                    RunError::Resource(res) => res.to_string(),
-                };
-                assert_eq!(output, expected, "[{test_name}] Exception mismatch");
+                let output = e.py_repr();
+                if output != *expected {
+                    return Err(TestFailure {
+                        test_name,
+                        kind: "Exception".to_string(),
+                        expected: expected.clone(),
+                        actual: output,
+                    });
+                }
+            } else if let Expectation::Traceback(expected) = expectation {
+                let output = e.to_string();
+                if output != *expected {
+                    return Err(TestFailure {
+                        test_name,
+                        kind: "Traceback".to_string(),
+                        expected: expected.clone(),
+                        actual: output,
+                    });
+                }
             } else {
-                panic!("[{test_name}] Unexpected error:\n{e}");
+                return Err(TestFailure {
+                    test_name,
+                    kind: "Unexpected error".to_string(),
+                    expected: "success".to_string(),
+                    actual: e.to_string(),
+                });
             }
         }
     }
+    Ok(())
 }
 
 /// Execute the iter loop, dispatching external function calls until complete.
-fn run_iter_loop(exec: ExecutorIter) -> Result<PyObject, RunError> {
-    let mut progress = exec.run_no_limits(vec![], &mut StdPrint)?;
+fn run_iter_loop(exec: ExecutorIter) -> Result<PyObject, PythonException> {
+    let limits = ResourceLimits::new().max_recursion_depth(Some(TEST_RECURSION_LIMIT));
+    let mut progress = exec.run_with_limits(vec![], limits, &mut StdPrint)?;
 
     loop {
         match progress {
@@ -449,7 +674,52 @@ fn split_code_for_module(code: &str, need_return_value: bool) -> (String, Option
     }
 }
 
-/// Run a test through CPython to verify Monty produces the same output
+/// Run the traceback script to get CPython's traceback output for a test file.
+///
+/// This imports scripts/run_traceback.py via pyo3 and calls `run_file_and_get_traceback()`
+/// which executes the file via runpy.run_path() to ensure full traceback information
+/// (including caret lines) is preserved.
+fn run_traceback_script(path: &Path) -> String {
+    Python::with_gil(|py| {
+        // Add scripts directory to sys.path (tests run from crates/monty/)
+        let sys = py.import("sys").expect("Failed to import sys");
+        let sys_path = sys.getattr("path").expect("Failed to get sys.path");
+        sys_path
+            .call_method1("insert", (0, "../../scripts"))
+            .expect("Failed to add scripts to sys.path");
+
+        // Import the run_traceback module
+        let run_traceback = py.import("run_traceback").expect("Failed to import run_traceback");
+
+        // Get absolute path for the test file
+        let abs_path = path.canonicalize().expect("Failed to get absolute path");
+        let path_str = abs_path.to_str().expect("Invalid UTF-8 in path");
+
+        // Call run_file_and_get_traceback with the recursion limit
+        let result = run_traceback
+            .call_method1("run_file_and_get_traceback", (path_str, TEST_RECURSION_LIMIT))
+            .expect("Failed to call run_file_and_get_traceback");
+
+        // Handle None return (no exception raised)
+        if result.is_none() {
+            String::new()
+        } else {
+            result.extract::<String>().expect("Failed to extract result string")
+        }
+    })
+}
+
+/// Result from CPython execution - either a value to compare, or an early return.
+enum CpythonResult {
+    /// Value to compare against expectation
+    Value(String),
+    /// No value to compare (NoException test succeeded)
+    NoValue,
+    /// Test failed with this error
+    Failed(TestFailure),
+}
+
+/// Try to run a test through CPython, returning Ok(()) on success or Err with failure details.
 ///
 /// This function executes the same Python code via CPython (using pyo3) and
 /// compares the result with the expected value. This ensures Monty behaves
@@ -458,21 +728,37 @@ fn split_code_for_module(code: &str, need_return_value: bool) -> (String, Option
 /// Code is executed at module level (not wrapped in a function) so that
 /// `global` keyword semantics work correctly.
 ///
-/// ParseError tests are skipped since Monty uses a different parser (ruff).
-fn run_cpython_test(path: &Path, code: &str, expectation: &Expectation) {
-    // Skip ParseError tests - Monty uses ruff parser which has different error messages
-    if matches!(expectation, Expectation::ParseError(_) | Expectation::RefCounts(_)) {
-        return;
+/// RefCounts tests are skipped as they're Monty-specific.
+/// Traceback tests use scripts/run_traceback.py for reliable caret line support.
+fn try_run_cpython_test(path: &Path, code: &str, expectation: &Expectation) -> Result<(), TestFailure> {
+    // Skip RefCounts tests - only relevant for Monty
+    if matches!(expectation, Expectation::RefCounts(_)) {
+        return Ok(());
     }
 
     let test_name = path.strip_prefix("test_cases/").unwrap_or(path).display().to_string();
+
+    // Traceback tests use the external script for reliable caret line support
+    if let Expectation::Traceback(expected) = expectation {
+        let result = run_traceback_script(path);
+        if result != *expected {
+            return Err(TestFailure {
+                test_name,
+                kind: "CPython traceback".to_string(),
+                expected: expected.clone(),
+                actual: result,
+            });
+        }
+        return Ok(());
+    }
+
     let need_return_value = matches!(
         expectation,
         Expectation::Return(_) | Expectation::ReturnStr(_) | Expectation::ReturnType(_)
     );
     let (statements, maybe_expr) = split_code_for_module(code, need_return_value);
 
-    let result: Option<String> = Python::with_gil(|py| {
+    let result: CpythonResult = Python::with_gil(|py| {
         // Execute statements at module level
         let globals = pyo3::types::PyDict::new(py);
 
@@ -482,12 +768,22 @@ fn run_cpython_test(path: &Path, code: &str, expectation: &Expectation) {
         // Handle exception during statement execution
         if let Err(e) = stmt_result {
             if matches!(expectation, Expectation::NoException) {
-                panic!("[{test_name}] Expected no exception but got: {e}");
+                return CpythonResult::Failed(TestFailure {
+                    test_name: test_name.clone(),
+                    kind: "CPython".to_string(),
+                    expected: "no exception".to_string(),
+                    actual: e.to_string(),
+                });
             }
             if matches!(expectation, Expectation::Raise(_)) {
-                return Some(format_cpython_exception(py, &e));
+                return CpythonResult::Value(format_cpython_exception(py, &e));
             }
-            panic!("[{test_name}] Unexpected CPython exception during statements: {e}");
+            return CpythonResult::Failed(TestFailure {
+                test_name: test_name.clone(),
+                kind: "CPython unexpected exception".to_string(),
+                expected: "success".to_string(),
+                actual: e.to_string(),
+            });
         }
 
         // If we have an expression to evaluate, evaluate it
@@ -496,13 +792,19 @@ fn run_cpython_test(path: &Path, code: &str, expectation: &Expectation) {
                 Ok(result) => {
                     // Code returned successfully - format based on expectation type
                     match expectation {
-                        Expectation::Return(_) => Some(result.repr().unwrap().to_string()),
-                        Expectation::ReturnStr(_) => Some(result.str().unwrap().to_string()),
-                        Expectation::ReturnType(_) => Some(result.get_type().name().unwrap().to_string()),
-                        Expectation::Raise(_) => {
-                            panic!("[{test_name}] Expected exception but code completed normally")
+                        Expectation::Return(_) => CpythonResult::Value(result.repr().unwrap().to_string()),
+                        Expectation::ReturnStr(_) => CpythonResult::Value(result.str().unwrap().to_string()),
+                        Expectation::ReturnType(_) => {
+                            CpythonResult::Value(result.get_type().name().unwrap().to_string())
                         }
-                        Expectation::NoException | Expectation::ParseError(_) | Expectation::RefCounts(_) => {
+                        Expectation::Raise(expected) => CpythonResult::Failed(TestFailure {
+                            test_name: test_name.clone(),
+                            kind: "CPython exception".to_string(),
+                            expected: expected.clone(),
+                            actual: "no exception raised".to_string(),
+                        }),
+                        // Traceback tests are handled by run_traceback_script above
+                        Expectation::Traceback(_) | Expectation::NoException | Expectation::RefCounts(_) => {
                             unreachable!()
                         }
                     }
@@ -510,30 +812,55 @@ fn run_cpython_test(path: &Path, code: &str, expectation: &Expectation) {
                 Err(e) => {
                     // Expression raised an exception
                     if matches!(expectation, Expectation::NoException) {
-                        panic!("[{test_name}] Expected no exception but got: {e}");
+                        return CpythonResult::Failed(TestFailure {
+                            test_name: test_name.clone(),
+                            kind: "CPython".to_string(),
+                            expected: "no exception".to_string(),
+                            actual: e.to_string(),
+                        });
                     }
                     if matches!(expectation, Expectation::Raise(_)) {
-                        return Some(format_cpython_exception(py, &e));
+                        return CpythonResult::Value(format_cpython_exception(py, &e));
                     }
-                    panic!("[{test_name}] Unexpected CPython exception during eval: {e}");
+                    // Traceback tests are handled by run_traceback_script above
+                    CpythonResult::Failed(TestFailure {
+                        test_name: test_name.clone(),
+                        kind: "CPython unexpected exception".to_string(),
+                        expected: "success".to_string(),
+                        actual: e.to_string(),
+                    })
                 }
             }
         } else {
             // No expression to evaluate
-            if matches!(expectation, Expectation::Raise(_)) {
-                panic!("[{test_name}] Expected exception but code completed normally");
+            // Traceback tests are handled by run_traceback_script above
+            if let Expectation::Raise(expected) = expectation {
+                return CpythonResult::Failed(TestFailure {
+                    test_name: test_name.clone(),
+                    kind: "CPython exception".to_string(),
+                    expected: expected.clone(),
+                    actual: "no exception raised".to_string(),
+                });
             }
-            None // NoException expectation - success
+            CpythonResult::NoValue // NoException expectation - success
         }
     });
 
-    // Only compare if we have a result to compare
-    if let Some(result) = result {
-        assert_eq!(
-            result,
-            expectation.expected_value(),
-            "[{test_name}] CPython result mismatch"
-        );
+    match result {
+        CpythonResult::Value(actual) => {
+            let expected = expectation.expected_value();
+            if actual != expected {
+                return Err(TestFailure {
+                    test_name,
+                    kind: "CPython result".to_string(),
+                    expected: expected.to_string(),
+                    actual,
+                });
+            }
+            Ok(())
+        }
+        CpythonResult::NoValue => Ok(()),
+        CpythonResult::Failed(failure) => Err(failure),
     }
 }
 
@@ -558,26 +885,52 @@ fn format_cpython_exception(py: Python<'_>, e: &pyo3::PyErr) -> String {
     }
 }
 
-/// Test function that runs each fixture through Monty
+/// Test function that runs each fixture through Monty.
+///
+/// Handles xfail with strict semantics: if a test is marked `xfail=monty`, it must fail.
+/// If an xfail test passes unexpectedly, that's an error.
 fn run_test_cases_monty(path: &Path) -> Result<(), Box<dyn Error>> {
     let content = fs::read_to_string(path)?;
-    let (code, expectation, skips) = parse_fixture(&content);
-    if !skips.monty {
-        if skips.iter_mode {
-            run_iter_test(path, &code, expectation);
-        } else {
-            run_test(path, &code, expectation);
-        }
+    let (code, expectation, config) = parse_fixture(&content);
+    let test_name = path.strip_prefix("test_cases/").unwrap_or(path).display().to_string();
+
+    let result = if config.iter_mode {
+        try_run_iter_test(path, &code, &expectation)
+    } else {
+        try_run_test(path, &code, &expectation)
+    };
+
+    if config.xfail_monty {
+        // Strict xfail: test must fail; if it passed, xfail should be removed
+        assert!(
+            result.is_err(),
+            "[{test_name}] Test marked xfail=monty passed unexpectedly. Remove xfail if the test is now fixed."
+        );
+    } else if let Err(failure) = result {
+        panic!("{failure}");
     }
     Ok(())
 }
 
-/// Test function that runs each fixture through CPython
+/// Test function that runs each fixture through CPython.
+///
+/// Handles xfail with strict semantics: if a test is marked `xfail=cpython`, it must fail.
+/// If an xfail test passes unexpectedly, that's an error.
 fn run_test_cases_cpython(path: &Path) -> Result<(), Box<dyn Error>> {
     let content = fs::read_to_string(path)?;
-    let (code, expectation, skips) = parse_fixture(&content);
-    if !skips.cpython {
-        run_cpython_test(path, &code, &expectation);
+    let (code, expectation, config) = parse_fixture(&content);
+    let test_name = path.strip_prefix("test_cases/").unwrap_or(path).display().to_string();
+
+    let result = try_run_cpython_test(path, &code, &expectation);
+
+    if config.xfail_cpython {
+        // Strict xfail: test must fail; if it passed, xfail should be removed
+        assert!(
+            result.is_err(),
+            "[{test_name}] Test marked xfail=cpython passed unexpectedly. Remove xfail if the test is now fixed."
+        );
+    } else if let Err(failure) = result {
+        panic!("{failure}");
     }
     Ok(())
 }

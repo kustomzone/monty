@@ -5,7 +5,7 @@
 //! - Output-only: Ellipsis, Tuple, Bytes, Exception, Repr (serialize but cannot deserialize)
 
 use indexmap::IndexMap;
-use monty::{exceptions::ExcType, Executor, PyObject};
+use monty::{ExcType, Executor, PyObject};
 
 // === JSON Input Tests ===
 

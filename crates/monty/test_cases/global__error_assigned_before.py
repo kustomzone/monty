@@ -4,4 +4,4 @@ def f():
 
 
 f()
-# ParseError=Exc: (<no-tb>) SyntaxError("name 'x' is assigned to before global declaration")
+# Raise=SyntaxError("name 'x' is assigned to before global declaration")

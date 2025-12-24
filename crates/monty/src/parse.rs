@@ -12,12 +12,13 @@ use ruff_text_size::{Ranged, TextRange};
 use crate::args::{ArgExprs, Kwarg};
 use crate::builtins::Builtins;
 use crate::callable::Callable;
-use crate::exceptions::ExcType;
+use crate::error::{CodeLoc, PythonException};
+use crate::exception::ExcType;
 use crate::expressions::{Expr, ExprLoc, Identifier, Literal};
 use crate::fstring::{ConversionFlag, FStringPart, FormatSpec};
 use crate::intern::{InternerBuilder, StringId};
 use crate::operators::{CmpOperator, Operator};
-use crate::parse_error::ParseError;
+use crate::StackFrame;
 
 /// A parameter in a function signature with optional default value.
 #[derive(Debug, Clone)]
@@ -111,12 +112,18 @@ pub enum ParseNode {
     ///
     /// Declares that the listed names refer to module-level (global) variables,
     /// allowing functions to read and write them instead of creating local variables.
-    Global(Vec<StringId>),
+    Global {
+        position: CodeRange,
+        names: Vec<StringId>,
+    },
     /// Nonlocal variable declaration.
     ///
     /// Declares that the listed names refer to variables in enclosing function scopes,
     /// allowing nested functions to read and write them instead of creating local variables.
-    Nonlocal(Vec<StringId>),
+    Nonlocal {
+        position: CodeRange,
+        names: Vec<StringId>,
+    },
 }
 
 /// Result of parsing: the AST nodes and the string interner with all interned names.
@@ -127,37 +134,18 @@ pub struct ParseResult {
 }
 
 pub(crate) fn parse(code: &str, filename: &str) -> Result<ParseResult, ParseError> {
+    let mut parser = Parser::new(code, filename);
     match parse_module(code) {
         Ok(parsed) => {
             let module = parsed.into_syntax();
-            let mut parser = Parser::new(code, filename);
             let nodes = parser.parse_statements(module.body)?;
             Ok(ParseResult {
                 nodes,
                 interner: parser.interner,
             })
         }
-        Err(e) => Err(syntax_error(e.to_string())),
+        Err(e) => Err(ParseError::syntax(e.to_string(), parser.convert_range(e.range()))),
     }
-}
-
-/// Creates a ParseError for an unimplemented Python feature.
-///
-/// Returns a `ParseError::PreEvalExc` containing a `NotImplementedError` exception.
-fn not_implemented(feature: &str) -> ParseError {
-    use crate::exceptions::ExceptionRaise;
-    let exc: ExceptionRaise = ExcType::not_implemented(feature).into();
-    exc.into()
-}
-
-/// Creates a ParseError for a syntax error.
-///
-/// Returns a `ParseError::PreEvalExc` containing a `SyntaxError` exception.
-fn syntax_error(message: String) -> ParseError {
-    use crate::exceptions::{exc_fmt, ExceptionRaise, SimpleException};
-    let exc: SimpleException = exc_fmt!(ExcType::SyntaxError; "{}", message);
-    let raise: ExceptionRaise = exc.into();
-    raise.into()
 }
 
 /// Parser for converting ruff AST to Monty's intermediate ParseNode representation.
@@ -219,7 +207,7 @@ impl<'a> Parser<'a> {
         match statement {
             Stmt::FunctionDef(function) => {
                 if function.is_async {
-                    return Err(not_implemented("async function definitions"));
+                    return Err(ParseError::not_implemented("async function definitions"));
                 }
 
                 let params = &function.parameters;
@@ -253,14 +241,16 @@ impl<'a> Parser<'a> {
 
                 Ok(ParseNode::FunctionDef { name, signature, body })
             }
-            Stmt::ClassDef(_) => Err(not_implemented("class definitions")),
+            Stmt::ClassDef(_) => Err(ParseError::not_implemented("class definitions")),
             Stmt::Return(ast::StmtReturn { value, .. }) => match value {
                 Some(value) => Ok(ParseNode::Return(self.parse_expression(*value)?)),
                 None => Ok(ParseNode::ReturnNone),
             },
-            Stmt::Delete(_) => Err(not_implemented("the 'del' statement")),
-            Stmt::TypeAlias(_) => Err(not_implemented("type aliases")),
-            Stmt::Assign(ast::StmtAssign { targets, value, .. }) => self.parse_assignment(first(targets)?, *value),
+            Stmt::Delete(_) => Err(ParseError::not_implemented("the 'del' statement")),
+            Stmt::TypeAlias(_) => Err(ParseError::not_implemented("type aliases")),
+            Stmt::Assign(ast::StmtAssign {
+                targets, value, range, ..
+            }) => self.parse_assignment(first(targets, self.convert_range(range))?, *value),
             Stmt::AugAssign(ast::StmtAugAssign { target, op, value, .. }) => Ok(ParseNode::OpAssign {
                 target: self.parse_identifier(*target)?,
                 op: convert_op(op),
@@ -279,7 +269,7 @@ impl<'a> Parser<'a> {
                 ..
             }) => {
                 if is_async {
-                    return Err(not_implemented("async for loops"));
+                    return Err(ParseError::not_implemented("async for loops"));
                 }
                 Ok(ParseNode::For {
                     target: self.parse_identifier(*target)?,
@@ -288,7 +278,7 @@ impl<'a> Parser<'a> {
                     or_else: self.parse_statements(orelse)?,
                 })
             }
-            Stmt::While(_) => Err(not_implemented("while loops")),
+            Stmt::While(_) => Err(ParseError::not_implemented("while loops")),
             Stmt::If(ast::StmtIf {
                 test,
                 body,
@@ -302,12 +292,12 @@ impl<'a> Parser<'a> {
             }
             Stmt::With(ast::StmtWith { is_async, .. }) => {
                 if is_async {
-                    Err(not_implemented("async context managers (async with)"))
+                    Err(ParseError::not_implemented("async context managers (async with)"))
                 } else {
-                    Err(not_implemented("context managers (with statements)"))
+                    Err(ParseError::not_implemented("context managers (with statements)"))
                 }
             }
-            Stmt::Match(_) => Err(not_implemented("pattern matching (match statements)")),
+            Stmt::Match(_) => Err(ParseError::not_implemented("pattern matching (match statements)")),
             Stmt::Raise(ast::StmtRaise { exc, .. }) => {
                 // TODO add cause to ParseNode::Raise
                 let expr = match exc {
@@ -318,9 +308,9 @@ impl<'a> Parser<'a> {
             }
             Stmt::Try(ast::StmtTry { is_star, .. }) => {
                 if is_star {
-                    Err(not_implemented("exception groups (try*/except*)"))
+                    Err(ParseError::not_implemented("exception groups (try*/except*)"))
                 } else {
-                    Err(not_implemented("try/except blocks"))
+                    Err(ParseError::not_implemented("try/except blocks"))
                 }
             }
             Stmt::Assert(ast::StmtAssert { test, msg, .. }) => {
@@ -331,27 +321,33 @@ impl<'a> Parser<'a> {
                 };
                 Ok(ParseNode::Assert { test, msg })
             }
-            Stmt::Import(_) => Err(not_implemented("import statements")),
-            Stmt::ImportFrom(_) => Err(not_implemented("from...import statements")),
-            Stmt::Global(ast::StmtGlobal { names, .. }) => {
+            Stmt::Import(_) => Err(ParseError::not_implemented("import statements")),
+            Stmt::ImportFrom(_) => Err(ParseError::not_implemented("from...import statements")),
+            Stmt::Global(ast::StmtGlobal { names, range, .. }) => {
                 let names = names
                     .iter()
                     .map(|id| self.interner.intern(&self.code[id.range]))
                     .collect();
-                Ok(ParseNode::Global(names))
+                Ok(ParseNode::Global {
+                    position: self.convert_range(range),
+                    names,
+                })
             }
-            Stmt::Nonlocal(ast::StmtNonlocal { names, .. }) => {
+            Stmt::Nonlocal(ast::StmtNonlocal { names, range, .. }) => {
                 let names = names
                     .iter()
                     .map(|id| self.interner.intern(&self.code[id.range]))
                     .collect();
-                Ok(ParseNode::Nonlocal(names))
+                Ok(ParseNode::Nonlocal {
+                    position: self.convert_range(range),
+                    names,
+                })
             }
             Stmt::Expr(ast::StmtExpr { value, .. }) => self.parse_expression(*value).map(ParseNode::Expr),
             Stmt::Pass(_) => Ok(ParseNode::Pass),
-            Stmt::Break(_) => Err(not_implemented("break statements")),
-            Stmt::Continue(_) => Err(not_implemented("continue statements")),
-            Stmt::IpyEscapeCommand(_) => Err(not_implemented("IPython escape commands")),
+            Stmt::Break(_) => Err(ParseError::not_implemented("break statements")),
+            Stmt::Continue(_) => Err(ParseError::not_implemented("continue statements")),
+            Stmt::IpyEscapeCommand(_) => Err(ParseError::not_implemented("IPython escape commands")),
         }
     }
 
@@ -401,7 +397,7 @@ impl<'a> Parser<'a> {
                 }
                 Ok(result)
             }
-            AstExpr::Named(_) => Err(not_implemented("named expressions (walrus operator :=)")),
+            AstExpr::Named(_) => Err(ParseError::not_implemented("named expressions (walrus operator :=)")),
             AstExpr::BinOp(ast::ExprBinOp {
                 left, op, right, range, ..
             }) => {
@@ -425,9 +421,9 @@ impl<'a> Parser<'a> {
                     let operand = Box::new(self.parse_expression(*operand)?);
                     Ok(ExprLoc::new(self.convert_range(range), Expr::UnaryMinus(operand)))
                 }
-                _ => Err(not_implemented("unary operators other than 'not' and '-'")),
+                _ => Err(ParseError::not_implemented("unary operators other than 'not' and '-'")),
             },
-            AstExpr::Lambda(_) => Err(not_implemented("lambda expressions")),
+            AstExpr::Lambda(_) => Err(ParseError::not_implemented("lambda expressions")),
             AstExpr::If(ast::ExprIf {
                 test,
                 body,
@@ -451,19 +447,19 @@ impl<'a> Parser<'a> {
                         let value_expr = self.parse_expression(value)?;
                         pairs.push((key_expr, value_expr));
                     } else {
-                        return Err(not_implemented("dictionary unpacking in literals"));
+                        return Err(ParseError::not_implemented("dictionary unpacking in literals"));
                     }
                 }
                 Ok(ExprLoc::new(self.convert_range(range), Expr::Dict(pairs)))
             }
-            AstExpr::Set(_) => Err(not_implemented("set literals")),
-            AstExpr::ListComp(_) => Err(not_implemented("list comprehensions")),
-            AstExpr::SetComp(_) => Err(not_implemented("set comprehensions")),
-            AstExpr::DictComp(_) => Err(not_implemented("dictionary comprehensions")),
-            AstExpr::Generator(_) => Err(not_implemented("generator expressions")),
-            AstExpr::Await(_) => Err(not_implemented("await expressions")),
-            AstExpr::Yield(_) => Err(not_implemented("yield expressions")),
-            AstExpr::YieldFrom(_) => Err(not_implemented("yield from expressions")),
+            AstExpr::Set(_) => Err(ParseError::not_implemented("set literals")),
+            AstExpr::ListComp(_) => Err(ParseError::not_implemented("list comprehensions")),
+            AstExpr::SetComp(_) => Err(ParseError::not_implemented("set comprehensions")),
+            AstExpr::DictComp(_) => Err(ParseError::not_implemented("dictionary comprehensions")),
+            AstExpr::Generator(_) => Err(ParseError::not_implemented("generator expressions")),
+            AstExpr::Await(_) => Err(ParseError::not_implemented("await expressions")),
+            AstExpr::Yield(_) => Err(ParseError::not_implemented("yield expressions")),
+            AstExpr::YieldFrom(_) => Err(ParseError::not_implemented("yield from expressions")),
             AstExpr::Compare(ast::ExprCompare {
                 left,
                 ops,
@@ -474,8 +470,8 @@ impl<'a> Parser<'a> {
                 self.convert_range(range),
                 Expr::CmpOp {
                     left: Box::new(self.parse_expression(*left)?),
-                    op: convert_compare_op(first(ops.into_vec())?),
-                    right: Box::new(self.parse_expression(first(comparators.into_vec())?)?),
+                    op: convert_compare_op(first(ops.into_vec(), self.convert_range(range))?),
+                    right: Box::new(self.parse_expression(first(comparators.into_vec(), self.convert_range(range))?)?),
                 },
             )),
             AstExpr::Call(ast::ExprCall {
@@ -490,14 +486,16 @@ impl<'a> Parser<'a> {
                     match arg_expr {
                         AstExpr::Starred(ast::ExprStarred { value, .. }) => {
                             if var_args_expr.is_some() {
-                                return Err(not_implemented("multiple *args unpacking"));
+                                return Err(ParseError::not_implemented("multiple *args unpacking"));
                             }
                             var_args_expr = Some(self.parse_expression(*value)?);
                             seen_star = true;
                         }
                         other => {
                             if seen_star {
-                                return Err(not_implemented("positional arguments after *args unpacking"));
+                                return Err(ParseError::not_implemented(
+                                    "positional arguments after *args unpacking",
+                                ));
                             }
                             positional_args.push(self.parse_expression(other)?);
                         }
@@ -532,13 +530,14 @@ impl<'a> Parser<'a> {
                             },
                         ))
                     }
-                    other => Err(ParseError::Internal(
-                        format!("Expected name or attribute, got {other:?}").into(),
+                    other => Err(ParseError::syntax(
+                        format!("Expected name or attribute, got {other:?}"),
+                        position,
                     )),
                 }
             }
             AstExpr::FString(ast::ExprFString { value, range, .. }) => self.parse_fstring(value, range),
-            AstExpr::TString(_) => Err(not_implemented("template strings (t-interns)")),
+            AstExpr::TString(_) => Err(ParseError::not_implemented("template strings (t-interns)")),
             AstExpr::StringLiteral(ast::ExprStringLiteral { value, range, .. }) => {
                 let string_id = self.interner.intern(&value.to_string());
                 Ok(ExprLoc::new(
@@ -558,10 +557,10 @@ impl<'a> Parser<'a> {
                 let const_value = match value {
                     Number::Int(i) => match i.as_i64() {
                         Some(i) => Literal::Int(i),
-                        None => return Err(not_implemented("integers larger than 64 bits")),
+                        None => return Err(ParseError::not_implemented("integers larger than 64 bits")),
                     },
                     Number::Float(f) => Literal::Float(f),
-                    Number::Complex { .. } => return Err(not_implemented("complex constants")),
+                    Number::Complex { .. } => return Err(ParseError::not_implemented("complex constants")),
                 };
                 Ok(ExprLoc::new(self.convert_range(range), Expr::Literal(const_value)))
             }
@@ -576,7 +575,7 @@ impl<'a> Parser<'a> {
                 self.convert_range(range),
                 Expr::Literal(Literal::Ellipsis),
             )),
-            AstExpr::Attribute(_) => Err(not_implemented("attribute access")),
+            AstExpr::Attribute(_) => Err(ParseError::not_implemented("attribute access")),
             AstExpr::Subscript(ast::ExprSubscript {
                 value, slice, range, ..
             }) => {
@@ -587,7 +586,7 @@ impl<'a> Parser<'a> {
                     Expr::Subscript { object, index },
                 ))
             }
-            AstExpr::Starred(_) => Err(not_implemented("starred expressions (*expr)")),
+            AstExpr::Starred(_) => Err(ParseError::not_implemented("starred expressions (*expr)")),
             AstExpr::Name(ast::ExprName { id, range, .. }) => {
                 let name = id.to_string();
                 let position = self.convert_range(range);
@@ -615,8 +614,8 @@ impl<'a> Parser<'a> {
 
                 Ok(ExprLoc::new(self.convert_range(range), Expr::Tuple(items)))
             }
-            AstExpr::Slice(_) => Err(not_implemented("slice syntax")),
-            AstExpr::IpyEscapeCommand(_) => Err(not_implemented("IPython escape commands")),
+            AstExpr::Slice(_) => Err(ParseError::not_implemented("slice syntax")),
+            AstExpr::IpyEscapeCommand(_) => Err(ParseError::not_implemented("IPython escape commands")),
         }
     }
 
@@ -637,7 +636,7 @@ impl<'a> Parser<'a> {
             } else {
                 // Var kwargs: **expr
                 if var_kwargs.is_some() {
-                    return Err(not_implemented("multiple **kwargs unpacking"));
+                    return Err(ParseError::not_implemented("multiple **kwargs unpacking"));
                 }
                 var_kwargs = Some(self.parse_expression(kwarg.value)?);
             }
@@ -649,7 +648,10 @@ impl<'a> Parser<'a> {
     fn parse_identifier(&mut self, ast: AstExpr) -> Result<Identifier, ParseError> {
         match ast {
             AstExpr::Name(ast::ExprName { id, range, .. }) => Ok(self.identifier(id, range)),
-            other => Err(ParseError::Internal(format!("Expected name, got {other:?}").into())),
+            other => Err(ParseError::syntax(
+                format!("Expected name, got {other:?}"),
+                self.convert_range(other.range()),
+            )),
         }
     }
 
@@ -788,9 +790,12 @@ impl<'a> Parser<'a> {
                 .into_iter()
                 .filter_map(|p| if let FStringPart::Literal(s) = p { Some(s) } else { None })
                 .collect();
-            let parsed = static_spec
-                .parse()
-                .map_err(|spec| syntax_error(format!("Invalid format specifier '{spec}'")))?;
+            let parsed = static_spec.parse().map_err(|spec_str| {
+                ParseError::syntax(
+                    format!("Invalid format specifier '{spec_str}'"),
+                    self.convert_range(spec.range),
+                )
+            })?;
             Ok(FormatSpec::Static(parsed))
         }
     }
@@ -798,11 +803,11 @@ impl<'a> Parser<'a> {
     fn convert_range(&self, range: TextRange) -> CodeRange {
         let start = range.start().into();
         let (start_line_no, start_line_start, _) = self.index_to_position(start);
-        let start = CodeLoc::new(start_line_no, start - start_line_start + 1);
+        let start = CodeLoc::new(start_line_no, start - start_line_start);
 
         let end = range.end().into();
         let (end_line_no, end_line_start, _) = self.index_to_position(end);
-        let end = CodeLoc::new(end_line_no, end - end_line_start + 1);
+        let end = CodeLoc::new(end_line_no, end - end_line_start);
 
         // Store line number for single-line ranges, None for multi-line
         let preview_line = if start_line_no == end_line_no {
@@ -822,18 +827,21 @@ impl<'a> Parser<'a> {
             }
             line_start = *line_end + 1;
         }
-        (self.line_ends.len() + 1, line_start, None)
+        // Content after the last newline (file without trailing newline)
+        // line_ends.len() gives the correct 0-indexed line number
+        (self.line_ends.len(), line_start, None)
     }
 }
 
-fn first<T: fmt::Debug>(v: Vec<T>) -> Result<T, ParseError> {
+fn first<T: fmt::Debug>(v: Vec<T>, position: CodeRange) -> Result<T, ParseError> {
     if v.len() == 1 {
         v.into_iter()
             .next()
-            .ok_or_else(|| ParseError::Internal("Expected 1 element, got 0".into()))
+            .ok_or_else(|| ParseError::syntax("Expected 1 element, got 0", position))
     } else {
-        Err(ParseError::Internal(
-            format!("Expected 1 element, got {} (raw: {v:?})", v.len()).into(),
+        Err(ParseError::syntax(
+            format!("Expected 1 element, got {} (raw: {v:?})", v.len()),
+            position,
         ))
     }
 }
@@ -904,11 +912,12 @@ pub struct CodeRange {
     end: CodeLoc,
 }
 
+/// Custom Debug implementation to make displaying code much less verbose.
 impl fmt::Debug for CodeRange {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         write!(
             f,
-            "CodeRange{{filename: {:?}, start: {}, end: {}}}",
+            "CodeRange{{filename: {:?}, start: {:?}, end: {:?}}}",
             self.filename, self.start, self.end
         )
     }
@@ -924,6 +933,24 @@ impl CodeRange {
         }
     }
 
+    /// Returns the start position.
+    #[must_use]
+    pub fn start(&self) -> CodeLoc {
+        self.start
+    }
+
+    /// Returns the end position.
+    #[must_use]
+    pub fn end(&self) -> CodeLoc {
+        self.end
+    }
+
+    /// Returns the preview line number (0-indexed) if available.
+    #[must_use]
+    pub fn preview_line_number(&self) -> Option<u32> {
+        self.preview_line
+    }
+
     pub fn extend(&self, end: &CodeRange) -> Self {
         Self {
             filename: self.filename,
@@ -936,64 +963,46 @@ impl CodeRange {
             end: end.end,
         }
     }
+}
 
-    /// Formats a traceback line for this code location.
-    ///
-    /// # Arguments
-    /// * `f` - The formatter to write to
-    /// * `frame_name` - The function name (or None for module-level)
-    /// * `source` - The original source code string for extracting preview lines
-    /// * `filename` - The filename string (looked up from StringId externally)
-    pub fn traceback(
-        &self,
-        f: &mut fmt::Formatter<'_>,
-        frame_name: Option<&str>,
-        source: &str,
-        filename: &str,
-    ) -> fmt::Result {
-        if let Some(frame_name) = frame_name {
-            writeln!(
-                f,
-                r#"  File "{}", line {}, in {}"#,
-                filename, self.start.line, frame_name
-            )?;
-        } else {
-            writeln!(
-                f,
-                r#"  File "{}", line {}, in <unknown frame>"#,
-                filename, self.start.line
-            )?;
-        }
+/// Errors that can occur during parsing or preparation of Python code.
+#[derive(Debug, Clone)]
+pub enum ParseError {
+    /// Error in syntax
+    Syntax {
+        msg: Cow<'static, str>,
+        position: CodeRange,
+    },
+    /// Missing feature from Monty, we hope to implement in the future
+    NotImplemented(Cow<'static, str>),
+}
 
-        if let Some(line_no) = self.preview_line {
-            // Extract the line from source by line number
-            if let Some(line) = source.lines().nth(line_no as usize) {
-                writeln!(f, "    {line}")?;
-                f.write_str(&" ".repeat(4 - 1 + self.start.column as usize))?;
-                writeln!(f, "{}", "~".repeat((self.end.column - self.start.column) as usize))?;
-            }
+impl ParseError {
+    fn not_implemented(msg: impl Into<Cow<'static, str>>) -> Self {
+        Self::NotImplemented(msg.into())
+    }
+
+    pub(crate) fn syntax(msg: impl Into<Cow<'static, str>>, position: CodeRange) -> Self {
+        Self::Syntax {
+            msg: msg.into(),
+            position,
         }
-        Ok(())
     }
 }
 
-#[derive(Debug, Clone, Copy, Eq, PartialEq, Default)]
-struct CodeLoc {
-    line: u32,
-    column: u32,
-}
-
-impl fmt::Display for CodeLoc {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        write!(f, "{}-{}", self.line, self.column)
-    }
-}
-
-impl CodeLoc {
-    fn new(line: usize, column: usize) -> Self {
-        Self {
-            line: line as u32,
-            column: column as u32,
+impl ParseError {
+    pub fn into_python_exc(self, filename: &str, source: &str) -> PythonException {
+        match self {
+            ParseError::Syntax { msg, position } => PythonException {
+                exc_type: ExcType::SyntaxError,
+                message: Some(msg.into_owned()),
+                traceback: vec![StackFrame::from_position(position, filename, source)],
+            },
+            ParseError::NotImplemented(msg) => PythonException {
+                exc_type: ExcType::NotImplementedError,
+                message: Some(format!("The monty syntax parser does not yet support {msg}")),
+                traceback: vec![],
+            },
         }
     }
 }

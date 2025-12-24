@@ -1,7 +1,7 @@
 [project]
 name = "monty"
 version = "0"
-requires-python = ">=3.14"
+requires-python = ">=3.13"
 
 [dependency-groups]
 dev = [
@@ -19,6 +19,7 @@ include = [
 # Exclude files with intentional syntax errors (used for testing parse error handling)
 extend-exclude = [
     "crates/monty/test_cases/nonlocal__error_module_level.py",
+    "crates/monty/test_cases/traceback__nonlocal_module_scope.py",
 ]
 
 [tool.ruff.lint]
@@ -31,7 +32,9 @@ extend-select = [
 flake8-quotes = { inline-quotes = "single", multiline-quotes = "double" }
 isort = { combine-as-imports = true }
 mccabe = { max-complexity = 14 }
-ignore = [
+
+[tool.ruff.lint.per-file-ignores]
+"crates/monty/test_cases/*.py" = [
     "F632", # ignore replace `is` with `==` - we have lots of these tests
     "F811", # Redefinition of unused variable
     "F541", # f-string without any placeholders
@@ -39,9 +42,8 @@ ignore = [
     "E712", # Comparison to True/False - needed for testing boolean behavior
     "E714", # Test for object identity should be `is not`
     "E721", # Use `is` and `is not` for type comparisons, or `isinstance()` for isinstance checks
+    "F821", # traceback undefined call test intentionally uses undefined name
 ]
-# iter mode tests use external functions defined in the test runner
-per-file-ignores = { "crates/monty/test_cases/ext_call__*.py" = ["F821"] }
 
 [tool.ruff.format]
 docstring-code-format = true

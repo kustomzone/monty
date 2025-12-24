@@ -7,7 +7,7 @@
 use std::str::FromStr;
 
 use crate::evaluate::{return_ext_call, EvalResult, EvaluateExpr};
-use crate::exceptions::{exc_fmt, ExcType};
+use crate::exception::{exc_err_fmt, exc_fmt, ExcType};
 use crate::expressions::ExprLoc;
 
 use crate::heap::{Heap, HeapData};
@@ -308,7 +308,12 @@ pub(crate) fn fstring_interpolation(
                 if let Ok(parsed) = spec_str.parse() {
                     apply_format_spec(result, &converted, &parsed, value_type)?;
                 } else {
-                    return Err(invalid_format_spec_error(&spec_str, value_type).into());
+                    return exc_err_fmt!(
+                        ExcType::ValueError;
+                        "Invalid format specifier '{}' for object of type '{}'",
+                        &spec_str,
+                        value_type.name()
+                    );
                 }
             }
         }
@@ -369,19 +374,6 @@ fn evaluate_dynamic_format_spec(
         }
     }
     Ok(EvalResult::Value(result))
-}
-
-/// Creates a ValueError for an invalid format specifier.
-///
-/// Matches Python's error message format:
-/// `ValueError: Invalid format specifier 'xyz' for object of type 'int'`
-fn invalid_format_spec_error(spec: &str, value_type: ValueType) -> crate::exceptions::SimpleException {
-    exc_fmt!(
-        ExcType::ValueError;
-        "Invalid format specifier '{}' for object of type '{}'",
-        spec,
-        value_type.name()
-    )
 }
 
 /// Validates that a format specification is valid for the given value type.

@@ -2,7 +2,7 @@ use std::fmt::Write;
 
 use crate::{
     args::ArgValues,
-    exceptions::{ExcType, RunError, StackFrame},
+    exception::{ExcType, RunError},
     expressions::{ExprLoc, Identifier, Node},
     heap::{Heap, HeapId},
     intern::Interns,
@@ -155,22 +155,16 @@ impl Function {
         // 4. Fill remaining slots with Undefined for local variables
         namespace.resize_with(self.namespace_size, || Value::Undefined);
 
-        // Create a new local namespace for this function call
-        let local_idx = namespaces.push(namespace);
-
-        // Create stack frame for error tracebacks
-        let parent_frame = StackFrame::new(self.name.position, self.name.name_id, None);
+        // Create a new local namespace for this function call (with memory and recursion tracking)
+        // For resource errors (recursion, memory), we don't attach a frame here - the caller
+        // will add the call site frame as the error propagates up, which is what we want.
+        let local_idx = namespaces
+            .push_with_heap(namespace, heap)
+            .map_err(|e| RunError::UncatchableExc(e.into_exception(None)))?;
 
         // Execute the function body in a new frame
         let mut p = NoPositionTracker;
-        let mut frame = RunFrame::function_frame(
-            local_idx,
-            self.name.name_id,
-            Some(parent_frame),
-            interns,
-            &mut p,
-            writer,
-        );
+        let mut frame = RunFrame::function_frame(local_idx, self.name.name_id, interns, &mut p, writer);
 
         let result = frame.execute(namespaces, heap, &self.body);
 
@@ -226,22 +220,14 @@ impl Function {
         // 4. Fill remaining slots with Undefined for local variables
         namespace.resize_with(self.namespace_size, || Value::Undefined);
 
-        // Create a new local namespace for this function call
-        let local_idx = namespaces.push(namespace);
-
-        // Create stack frame for error tracebacks
-        let parent_frame = StackFrame::new(self.name.position, self.name.name_id, None);
+        // Create a new local namespace for this function call (with memory and recursion tracking)
+        // For resource errors (recursion, memory), we don't attach a frame here - the caller
+        // will add the call site frame as the error propagates up, which is what we want.
+        let local_idx = namespaces.push_with_heap(namespace, heap)?;
 
         // Execute the function body in a new frame
         let mut p = NoPositionTracker;
-        let mut frame = RunFrame::function_frame(
-            local_idx,
-            self.name.name_id,
-            Some(parent_frame),
-            interns,
-            &mut p,
-            writer,
-        );
+        let mut frame = RunFrame::function_frame(local_idx, self.name.name_id, interns, &mut p, writer);
 
         let result = frame.execute(namespaces, heap, &self.body);
 

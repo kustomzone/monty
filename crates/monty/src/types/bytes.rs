@@ -8,7 +8,7 @@ use ahash::AHashSet;
 
 use super::{PyTrait, Type};
 use crate::args::ArgValues;
-use crate::exceptions::ExcType;
+use crate::exception::ExcType;
 use crate::heap::{Heap, HeapData, HeapId};
 use crate::intern::Interns;
 use crate::resource::ResourceTracker;

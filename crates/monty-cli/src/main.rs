@@ -22,7 +22,7 @@ fn main() -> ExitCode {
     let ex = match ExecutorIter::new(&code, file_path, &input_names, ext_functions) {
         Ok(ex) => ex,
         Err(err) => {
-            eprintln!("error: {err}");
+            eprintln!("error:\n{err}");
             return ExitCode::FAILURE;
         }
     };
@@ -31,7 +31,7 @@ fn main() -> ExitCode {
     match ex.run_no_limits(inputs, &mut StdPrint) {
         Ok(ExecProgress::Complete(value)) => {
             let elapsed = start.elapsed();
-            eprintln!("{elapsed:?}, output: {value}");
+            eprintln!("success after: {elapsed:?}\n{value}");
             ExitCode::SUCCESS
         }
         Ok(ExecProgress::FunctionCall {
@@ -45,7 +45,7 @@ fn main() -> ExitCode {
         }
         Err(err) => {
             let elapsed = start.elapsed();
-            eprintln!("{elapsed:?}, error: {err}");
+            eprintln!("error after: {elapsed:?}\n{err}");
             ExitCode::FAILURE
         }
     }

@@ -1,4 +1,3 @@
-# skip=cpython
 # value-based identity: same value = same id
 x = 100
 y = x

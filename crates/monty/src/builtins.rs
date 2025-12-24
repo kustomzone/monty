@@ -4,8 +4,7 @@ use std::str::FromStr;
 use strum::{Display, EnumString, IntoStaticStr};
 
 use crate::args::{ArgValues, KwargsValues};
-use crate::exceptions::{exc_err_fmt, exc_fmt, ExcType};
-use crate::RunError;
+use crate::exception::{exc_err_fmt, exc_fmt, ExcType, RunError};
 
 use crate::heap::{Heap, HeapData};
 use crate::intern::Interns;

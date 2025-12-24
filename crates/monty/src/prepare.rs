@@ -4,15 +4,13 @@ use ahash::{AHashMap, AHashSet};
 
 use crate::args::ArgExprs;
 use crate::callable::Callable;
-use crate::exceptions::{ExcType, ExceptionRaise, SimpleException};
 use crate::expressions::{Expr, ExprLoc, Identifier, Literal, NameScope, Node};
 use crate::fstring::{FStringPart, FormatSpec};
 use crate::function::Function;
 use crate::intern::{FunctionId, InternerBuilder, StringId};
 use crate::namespace::NamespaceId;
 use crate::operators::{CmpOperator, Operator};
-use crate::parse::{ParseNode, ParseResult, ParsedSignature};
-use crate::parse_error::ParseError;
+use crate::parse::{ParseError, ParseNode, ParseResult, ParsedSignature};
 use crate::signature::Signature;
 
 /// Result of the prepare phase, containing everything needed to execute code.
@@ -283,14 +281,9 @@ impl<'i> Prepare<'i> {
                                 Expr::Name(id) => {
                                     // Handle raising a variable - could be an exception type or instance.
                                     // The runtime will determine whether to call it (type) or raise it directly (instance).
+                                    // Don't error here if undefined - let runtime raise NameError with proper traceback.
                                     let position = id.position;
-                                    let (resolved_id, is_new) = self.get_id(id);
-                                    if is_new {
-                                        let name_str = self.interner.get_str(resolved_id.name_id).to_string();
-                                        let exc: ExceptionRaise =
-                                            SimpleException::new(ExcType::NameError, Some(name_str)).into();
-                                        return Err(exc.into());
-                                    }
+                                    let (resolved_id, _is_new) = self.get_id(id);
                                     Some(ExprLoc::new(position, Expr::Name(resolved_id)))
                                 }
                                 _ => Some(self.prepare_expression(expr)?),
@@ -357,7 +350,7 @@ impl<'i> Prepare<'i> {
                     let func_node = self.prepare_function_def(name, signature, body)?;
                     new_nodes.push(func_node);
                 }
-                ParseNode::Global(names) => {
+                ParseNode::Global { names, position } => {
                     // At module level, `global` is a no-op since all variables are already global.
                     // In functions, the global declarations are already collected in the first pass
                     // (see prepare_function_def), so this is also a no-op at this point.
@@ -365,51 +358,64 @@ impl<'i> Prepare<'i> {
                     if !self.is_module_scope {
                         // Validate that names weren't already used/assigned before `global` declaration
                         for string_id in names {
-                            let name_str = self.interner.get_str(string_id).to_string();
-                            if self.names_assigned_in_order.contains(&name_str) {
+                            let name_str = self.interner.get_str(string_id);
+                            if self.names_assigned_in_order.contains(name_str) {
                                 // Name was assigned before the global declaration
-                                let exc: ExceptionRaise =
-                                    ExcType::syntax_error_assigned_before_global(&name_str).into();
-                                return Err(exc.into());
-                            } else if self.name_map.contains_key(&name_str) {
+                                return Err(ParseError::syntax(
+                                    format!("name '{name_str}' is assigned to before global declaration"),
+                                    position,
+                                ));
+                            } else if self.name_map.contains_key(name_str) {
                                 // Name was used (but not assigned) before the global declaration
-                                let exc: ExceptionRaise = ExcType::syntax_error_used_before_global(&name_str).into();
-                                return Err(exc.into());
+                                return Err(ParseError::syntax(
+                                    format!("name '{name_str}' is used prior to global declaration"),
+                                    position,
+                                ));
                             }
                         }
                     }
                     // Global statements don't produce any runtime nodes
                 }
-                ParseNode::Nonlocal(names) => {
+                ParseNode::Nonlocal { names, position } => {
                     // Nonlocal can only be used inside a function, not at module level
                     if self.is_module_scope {
-                        let exc: ExceptionRaise = ExcType::syntax_error_nonlocal_at_module().into();
-                        return Err(exc.into());
+                        return Err(ParseError::syntax(
+                            "nonlocal declaration not allowed at module level",
+                            position,
+                        ));
                     }
                     // Validate that names weren't already used/assigned before `nonlocal` declaration
                     // and that the binding exists in an enclosing scope
                     for string_id in names {
-                        let name_str = self.interner.get_str(string_id).to_string();
-                        if self.names_assigned_in_order.contains(&name_str) {
+                        let name_str = self.interner.get_str(string_id);
+                        if self.names_assigned_in_order.contains(name_str) {
                             // Name was assigned before the nonlocal declaration
-                            let exc: ExceptionRaise = ExcType::syntax_error_assigned_before_nonlocal(&name_str).into();
-                            return Err(exc.into());
-                        } else if self.name_map.contains_key(&name_str) {
+                            return Err(ParseError::syntax(
+                                format!("name '{name_str}' is assigned to before nonlocal declaration"),
+                                position,
+                            ));
+                        } else if self.name_map.contains_key(name_str) {
                             // Name was used (but not assigned) before the nonlocal declaration
-                            let exc: ExceptionRaise = ExcType::syntax_error_used_before_nonlocal(&name_str).into();
-                            return Err(exc.into());
+                            return Err(ParseError::syntax(
+                                format!("name '{name_str}' is used prior to nonlocal declaration"),
+                                position,
+                            ));
                         }
                         // Validate that the binding exists in an enclosing scope
                         if let Some(ref enclosing) = self.enclosing_locals {
-                            if !enclosing.contains(&name_str) {
-                                let exc: ExceptionRaise = ExcType::syntax_error_no_binding_nonlocal(&name_str).into();
-                                return Err(exc.into());
+                            if !enclosing.contains(name_str) {
+                                return Err(ParseError::syntax(
+                                    format!("no binding for nonlocal '{name_str}' found"),
+                                    position,
+                                ));
                             }
                         } else {
                             // No enclosing scope (function defined at module level)
                             // The nonlocal must reference something in an enclosing function
-                            let exc: ExceptionRaise = ExcType::syntax_error_no_binding_nonlocal(&name_str).into();
-                            return Err(exc.into());
+                            return Err(ParseError::syntax(
+                                format!("no binding for nonlocal '{name_str}' found"),
+                                position,
+                            ));
                         }
                     }
                     // Nonlocal statements don't produce any runtime nodes
@@ -451,32 +457,17 @@ impl<'i> Prepare<'i> {
                 // Prepare the arguments
                 args.prepare_args(|expr| self.prepare_expression(expr))?;
                 // For Name callables, resolve the identifier in the namespace
+                // Don't error here if undefined - let runtime raise NameError with proper traceback
                 let callable = match callable {
-                    Callable::Name(ident) => {
-                        let (resolved_ident, is_new) = self.get_id(ident);
-                        // Calling an undefined variable should fail at prepare-time, not runtime.
-                        if is_new {
-                            let name_str = self.interner.get_str(resolved_ident.name_id).to_string();
-                            let exc: ExceptionRaise = SimpleException::new(ExcType::NameError, Some(name_str)).into();
-                            return Err(exc.into());
-                        }
-                        Callable::Name(resolved_ident)
-                    }
+                    Callable::Name(ident) => Callable::Name(self.get_id(ident).0),
                     // Builtins are already resolved at parse time
                     other @ Callable::Builtin(_) => other,
                 };
                 Expr::Call { callable, args }
             }
             Expr::AttrCall { object, attr, mut args } => {
-                let (object, is_new) = self.get_id(object);
-                // Unlike regular name lookups, attribute calls require the object to already exist.
-                // Calling a method on an undefined variable should fail at prepare-time, not runtime.
-                // Example: `undefined_var.method()` should raise NameError here.
-                if is_new {
-                    let name_str = self.interner.get_str(object.name_id).to_string();
-                    let exc: ExceptionRaise = SimpleException::new(ExcType::NameError, Some(name_str)).into();
-                    return Err(exc.into());
-                }
+                // Don't error here if object is undefined - let runtime raise NameError with proper traceback.
+                let (object, _is_new) = self.get_id(object);
                 args.prepare_args(|expr| self.prepare_expression(expr))?;
                 Expr::AttrCall { object, attr, args }
             }
@@ -1004,12 +995,12 @@ fn collect_scope_info_from_node(
     interner: &InternerBuilder,
 ) {
     match node {
-        ParseNode::Global(names) => {
+        ParseNode::Global { names, .. } => {
             for string_id in names {
                 global_names.insert(interner.get_str(*string_id).to_string());
             }
         }
-        ParseNode::Nonlocal(names) => {
+        ParseNode::Nonlocal { names, .. } => {
             for string_id in names {
                 nonlocal_names.insert(interner.get_str(*string_id).to_string());
             }
@@ -1181,7 +1172,7 @@ fn collect_referenced_names_from_node(node: &ParseNode, referenced: &mut AHashSe
         ParseNode::FunctionDef { .. } => {
             // Don't recurse into nested function bodies - they have their own scope
         }
-        ParseNode::Pass | ParseNode::ReturnNone | ParseNode::Global(_) | ParseNode::Nonlocal(_) => {}
+        ParseNode::Pass | ParseNode::ReturnNone | ParseNode::Global { .. } | ParseNode::Nonlocal { .. } => {}
     }
 }
 

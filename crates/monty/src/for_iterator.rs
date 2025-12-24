@@ -10,7 +10,7 @@
 //! For constructors like `list()` and `tuple()`, use `ForIterator::new()` followed
 //! by `collect()` to materialize all items into a Vec.
 
-use crate::exceptions::ExcType;
+use crate::exception::ExcType;
 use crate::heap::{Heap, HeapData, HeapId};
 use crate::intern::{BytesId, Interns};
 use crate::resource::ResourceTracker;

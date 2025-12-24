@@ -11,10 +11,10 @@ use serde::{Deserialize, Deserializer, Serialize, Serializer};
 
 use crate::{
     builtins::Builtins,
-    exceptions::{ExcType, SimpleException},
+    exception::{ExcType, SimpleException},
     heap::{Heap, HeapData, HeapId},
     intern::Interns,
-    resource::ResourceTracker,
+    resource::{ResourceError, ResourceTracker},
     types::{
         bytes::{bytes_repr, Bytes},
         dict::Dict,
@@ -186,8 +186,8 @@ impl PyObject {
                 let exc = SimpleException::new(exc_type, arg);
                 Ok(Value::Exc(exc))
             }
-            Self::Repr(_) => Err(InvalidInputError::new("Repr")),
-            Self::Cycle(_, _) => Err(InvalidInputError::new("Cycle")),
+            Self::Repr(_) => Err(InvalidInputError::invalid_type("Repr")),
+            Self::Cycle(_, _) => Err(InvalidInputError::invalid_type("Cycle")),
             Self::Type(t) => Ok(Value::Builtin(Builtins::Type(t))),
         }
     }
@@ -518,28 +518,24 @@ impl std::error::Error for ConversionError {}
 #[derive(Debug, Clone)]
 pub enum InvalidInputError {
     /// The input type is not valid for conversion to a runtime Value.
-    InvalidType {
-        /// The type name of the invalid input value
-        type_name: &'static str,
-    },
+    /// The type name of the invalid input value
+    InvalidType(&'static str),
     /// A resource limit was exceeded during conversion.
-    Resource(crate::resource::ResourceError),
+    Resource(ResourceError),
 }
 
 impl InvalidInputError {
     /// Creates a new `InvalidInputError` for the given type name.
     #[must_use]
-    pub fn new(type_name: &'static str) -> Self {
-        Self::InvalidType { type_name }
+    pub fn invalid_type(type_name: &'static str) -> Self {
+        Self::InvalidType(type_name)
     }
 }
 
 impl fmt::Display for InvalidInputError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
-            Self::InvalidType { type_name } => {
-                write!(f, "'{type_name}' is not a valid input value")
-            }
+            Self::InvalidType(type_name) => write!(f, "'{type_name}' is not a valid input value"),
             Self::Resource(e) => write!(f, "{e}"),
         }
     }

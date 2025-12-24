@@ -1,23 +1,23 @@
 use crate::evaluate::ExternalCall;
-use crate::exceptions::{ExcType, InternalRunError, RunError};
+use crate::exception::{ExcType, RunError};
 use crate::expressions::Node;
 use crate::heap::Heap;
 use crate::intern::{ExtFunctionId, Interns};
 use crate::io::{PrintWriter, StdPrint};
 use crate::namespace::Namespaces;
 use crate::object::PyObject;
-use crate::parse::parse;
-use crate::parse_error::ParseError;
+use crate::parse::{parse, ParseError};
 use crate::position::{FrameExit, NoPositionTracker, Position, PositionTracker};
 use crate::prepare::prepare;
 use crate::resource::NoLimitTracker;
 use crate::resource::{LimitedTracker, ResourceLimits, ResourceTracker};
 use crate::run_frame::{RunFrame, RunResult};
 use crate::value::Value;
+use crate::PythonException;
 
 /// Main executor that parses and runs Python code.
 ///
-/// The executor stores the compiled AST.
+/// The executor stores the compiled AST and source code for error reporting.
 #[derive(Debug, Clone)]
 pub struct Executor {
     namespace_size: usize,
@@ -29,6 +29,8 @@ pub struct Executor {
     interns: Interns,
     /// ids to create values to inject into the the namespace to represent external functions.
     external_function_ids: Vec<ExtFunctionId>,
+    /// Source code for error reporting (extracting preview lines for tracebacks).
+    source: String,
 }
 
 impl Executor {
@@ -41,11 +43,14 @@ impl Executor {
     ///
     /// # Returns
     /// A new `Executor` instance which can be used to execute the code.
-    pub fn new(code: &str, filename: &str, input_names: &[&str]) -> Result<Self, ParseError> {
-        Self::new_with_ext_functions(code, filename, input_names, vec![])
+    ///
+    /// # Errors
+    /// Returns `PythonException` if the code cannot be parsed.
+    pub fn new(code: &str, filename: &str, input_names: &[&str]) -> Result<Self, PythonException> {
+        Self::new_internal(code, filename, input_names, vec![]).map_err(|e| e.into_python_exc(filename, code))
     }
 
-    fn new_with_ext_functions(
+    fn new_internal(
         code: &str,
         filename: &str,
         input_names: &[&str],
@@ -64,6 +69,7 @@ impl Executor {
             nodes: prepared.nodes,
             interns: Interns::new(prepared.interner, prepared.functions, external_functions),
             external_function_ids,
+            source: code.to_string(),
         })
     }
 
@@ -83,8 +89,9 @@ impl Executor {
     /// let py_object = ex.run_no_limits(vec![]).unwrap();
     /// assert_eq!(py_object, monty::PyObject::Int(3));
     /// ```
-    pub fn run_no_limits(&self, inputs: Vec<PyObject>) -> Result<PyObject, RunError> {
+    pub fn run_no_limits(&self, inputs: Vec<PyObject>) -> Result<PyObject, PythonException> {
         self.run_with_tracker(inputs, NoLimitTracker::default(), &mut StdPrint)
+            .map_err(|e| e.into_python_exception(&self.interns, &self.source))
     }
 
     /// Executes the code with configurable resource limits.
@@ -107,9 +114,10 @@ impl Executor {
     /// let py_object = ex.run_with_limits(vec![], limits).unwrap();
     /// assert_eq!(py_object, PyObject::Int(3));
     /// ```
-    pub fn run_with_limits(&self, inputs: Vec<PyObject>, limits: ResourceLimits) -> Result<PyObject, RunError> {
+    pub fn run_with_limits(&self, inputs: Vec<PyObject>, limits: ResourceLimits) -> Result<PyObject, PythonException> {
         let resource_tracker = LimitedTracker::new(limits);
         self.run_with_tracker(inputs, resource_tracker, &mut StdPrint)
+            .map_err(|e| e.into_python_exception(&self.interns, &self.source))
     }
 
     /// Executes the code with a custom print writer.
@@ -119,8 +127,13 @@ impl Executor {
     /// # Arguments
     /// * `inputs` - Values to fill the first N slots of the namespace
     /// * `writer` - Custom print writer implementation
-    pub fn run_with_writer(&self, inputs: Vec<PyObject>, writer: &mut impl PrintWriter) -> Result<PyObject, RunError> {
+    pub fn run_with_writer(
+        &self,
+        inputs: Vec<PyObject>,
+        writer: &mut impl PrintWriter,
+    ) -> Result<PyObject, PythonException> {
         self.run_with_tracker(inputs, NoLimitTracker::default(), writer)
+            .map_err(|e| e.into_python_exception(&self.interns, &self.source))
     }
 
     /// Executes the code with a custom resource tracker.
@@ -168,48 +181,52 @@ impl Executor {
     ///
     /// Only available when the `ref-counting` feature is enabled.
     #[cfg(feature = "ref-counting")]
-    pub fn run_ref_counts(&self, inputs: Vec<PyObject>) -> RunResult<RefCountOutput> {
+    pub fn run_ref_counts(&self, inputs: Vec<PyObject>) -> Result<RefCountOutput, PythonException> {
         use crate::value::Value;
         use std::collections::HashSet;
 
-        let mut heap = Heap::new(self.namespace_size, NoLimitTracker::default());
-        let mut namespaces = self.prepare_namespaces(inputs, &mut heap)?;
+        let run = || -> RunResult<RefCountOutput> {
+            let mut heap = Heap::new(self.namespace_size, NoLimitTracker::default());
+            let mut namespaces = self.prepare_namespaces(inputs, &mut heap)?;
 
-        let mut position_tracker = NoPositionTracker;
-        let mut print_writer = StdPrint;
-        let mut frame = RunFrame::module_frame(&self.interns, &mut position_tracker, &mut print_writer);
-        // Use execute() instead of execute_py_object() so the return value stays alive
-        // while we compute refcounts
-        let frame_exit = frame.execute(&mut namespaces, &mut heap, &self.nodes)?;
+            let mut position_tracker = NoPositionTracker;
+            let mut print_writer = StdPrint;
+            let mut frame = RunFrame::module_frame(&self.interns, &mut position_tracker, &mut print_writer);
+            // Use execute() instead of execute_py_object() so the return value stays alive
+            // while we compute refcounts
+            let frame_exit = frame.execute(&mut namespaces, &mut heap, &self.nodes)?;
 
-        // Compute ref counts before consuming the heap - return value is still alive in frame_exit
-        let final_namespace = namespaces.into_global();
-        let mut counts = ahash::AHashMap::new();
-        let mut unique_ids = HashSet::new();
+            // Compute ref counts before consuming the heap - return value is still alive in frame_exit
+            let final_namespace = namespaces.into_global();
+            let mut counts = ahash::AHashMap::new();
+            let mut unique_ids = HashSet::new();
 
-        for (name, &namespace_id) in &self.name_map {
-            if let Some(Value::Ref(id)) = final_namespace.get_opt(namespace_id) {
-                counts.insert(name.clone(), heap.get_refcount(*id));
-                unique_ids.insert(*id);
+            for (name, &namespace_id) in &self.name_map {
+                if let Some(Value::Ref(id)) = final_namespace.get_opt(namespace_id) {
+                    counts.insert(name.clone(), heap.get_refcount(*id));
+                    unique_ids.insert(*id);
+                }
             }
-        }
-        let unique_refs = unique_ids.len();
-        let heap_count = heap.entry_count();
+            let unique_refs = unique_ids.len();
+            let heap_count = heap.entry_count();
 
-        // Clean up the namespace after reading ref counts but before moving the heap
-        for obj in final_namespace {
-            obj.drop_with_heap(&mut heap);
-        }
+            // Clean up the namespace after reading ref counts but before moving the heap
+            for obj in final_namespace {
+                obj.drop_with_heap(&mut heap);
+            }
 
-        // Now convert the return value to PyObject (this drops the Value, decrementing refcount)
-        let py_object = frame_exit_to_object(frame_exit, &mut heap, &self.interns)?;
+            // Now convert the return value to PyObject (this drops the Value, decrementing refcount)
+            let py_object = frame_exit_to_object(frame_exit, &mut heap, &self.interns)?;
 
-        Ok(RefCountOutput {
-            py_object,
-            counts,
-            unique_refs,
-            heap_count,
-        })
+            Ok(RefCountOutput {
+                py_object,
+                counts,
+                unique_refs,
+                heap_count,
+            })
+        };
+
+        run().map_err(|e| e.into_python_exception(&self.interns, &self.source))
     }
 
     /// Prepares the namespace namespaces for execution.
@@ -220,14 +237,12 @@ impl Executor {
         &self,
         inputs: Vec<PyObject>,
         heap: &mut Heap<impl ResourceTracker>,
-    ) -> Result<Namespaces, InternalRunError> {
+    ) -> Result<Namespaces, RunError> {
         let Some(extra) = self
             .namespace_size
             .checked_sub(self.external_function_ids.len() + inputs.len())
         else {
-            return Err(InternalRunError::Error(
-                format!("input length should be <= {}", self.namespace_size).into(),
-            ));
+            return Err(RunError::internal("too many inputs for namespace"));
         };
         // register external functions in the namespace first, matching the logic in prepare
         let mut namespace: Vec<Value> = Vec::with_capacity(self.namespace_size);
@@ -239,7 +254,7 @@ impl Executor {
             namespace.push(
                 input
                     .to_value(heap, &self.interns)
-                    .map_err(|e| InternalRunError::Error(e.to_string().into()))?,
+                    .map_err(|_| RunError::internal("invalid input type"))?,
             );
         }
         if extra > 0 {
@@ -415,17 +430,29 @@ impl<T: ResourceTracker> FunctionCallExecutorState<T> {
     ///
     /// # Arguments
     /// * `return_value` - The value returned by the external function
-    pub fn run(mut self, return_value: PyObject, writer: &mut impl PrintWriter) -> Result<ExecProgress<T>, RunError> {
+    pub fn run(
+        mut self,
+        return_value: PyObject,
+        writer: &mut impl PrintWriter,
+    ) -> Result<ExecProgress<T>, PythonException> {
+        // Clone data needed for error handling before consuming self.executor
+        // This is necessary because run_from_position consumes the executor,
+        // but we need interns and source to convert errors to PythonException
+        let interns = self.executor.interns.clone();
+        let source = self.executor.source.clone();
+
         // Convert PyObject to Value
         let value = return_value
             .to_value(&mut self.heap, &self.executor.interns)
-            .map_err(|e| InternalRunError::Error(e.to_string().into()))?;
+            .map_err(|_| RunError::internal("invalid return value type").into_python_exception(&interns, &source))?;
 
         self.namespaces.push_return_value(value);
 
         // Continue execution from saved position
+        // Note: run_from_position consumes self.executor, but may return it in ExecProgress::FunctionCall
         self.executor
             .run_from_position(self.heap, self.namespaces, self.position_stack.into(), writer)
+            .map_err(|e| e.into_python_exception(&interns, &source))
     }
 }
 
@@ -472,14 +499,15 @@ impl ExecutorIter {
     /// * `input_names` - Names of input variables
     ///
     /// # Errors
-    /// Returns `ParseError` if the code cannot be parsed.
+    /// Returns `PythonException` if the code cannot be parsed.
     pub fn new(
         code: &str,
         filename: &str,
         input_names: &[&str],
         external_functions: Vec<String>,
-    ) -> Result<Self, ParseError> {
-        let executor = Executor::new_with_ext_functions(code, filename, input_names, external_functions)?;
+    ) -> Result<Self, PythonException> {
+        let executor = Executor::new_internal(code, filename, input_names, external_functions)
+            .map_err(|e| e.into_python_exc(filename, code))?;
         Ok(Self { executor })
     }
 
@@ -491,7 +519,7 @@ impl ExecutorIter {
     /// * `inputs` - Initial input values (must match length of `input_names` from `new()`)
     ///
     /// # Errors
-    /// Returns `RunError` if:
+    /// Returns `PythonException` if:
     /// - The number of inputs doesn't match the expected count
     /// - An input value is invalid (e.g., `PyObject::Repr`)
     /// - A runtime error occurs during execution
@@ -499,7 +527,7 @@ impl ExecutorIter {
         self,
         inputs: Vec<PyObject>,
         writer: &mut impl PrintWriter,
-    ) -> Result<ExecProgress<NoLimitTracker>, RunError> {
+    ) -> Result<ExecProgress<NoLimitTracker>, PythonException> {
         self.run_with_tracker(inputs, NoLimitTracker::default(), writer)
     }
 
@@ -512,7 +540,7 @@ impl ExecutorIter {
     /// * `limits` - Resource limits for the execution
     ///
     /// # Errors
-    /// Returns `RunError` if:
+    /// Returns `PythonException` if:
     /// - The number of inputs doesn't match the expected count
     /// - An input value is invalid (e.g., `PyObject::Repr`)
     /// - A runtime error occurs during execution
@@ -521,7 +549,7 @@ impl ExecutorIter {
         inputs: Vec<PyObject>,
         limits: ResourceLimits,
         writer: &mut impl PrintWriter,
-    ) -> Result<ExecProgress<LimitedTracker>, RunError> {
+    ) -> Result<ExecProgress<LimitedTracker>, PythonException> {
         let resource_tracker = LimitedTracker::new(limits);
         self.run_with_tracker(inputs, resource_tracker, writer)
     }
@@ -536,7 +564,7 @@ impl ExecutorIter {
     /// * `writer` - Writer for print output
     ///
     /// # Errors
-    /// Returns `RunError` if:
+    /// Returns `PythonException` if:
     /// - The number of inputs doesn't match the expected count
     /// - An input value is invalid (e.g., `PyObject::Repr`)
     /// - A runtime error occurs during execution
@@ -545,14 +573,22 @@ impl ExecutorIter {
         inputs: Vec<PyObject>,
         resource_tracker: T,
         writer: &mut impl PrintWriter,
-    ) -> Result<ExecProgress<T>, RunError> {
+    ) -> Result<ExecProgress<T>, PythonException> {
+        // Clone data needed for error handling before consuming self.executor
+        let interns = self.executor.interns.clone();
+        let source = self.executor.source.clone();
+
         let mut heap = Heap::new(self.executor.namespace_size, resource_tracker);
 
-        let namespaces = self.executor.prepare_namespaces(inputs, &mut heap)?;
+        let namespaces = self
+            .executor
+            .prepare_namespaces(inputs, &mut heap)
+            .map_err(|e| e.into_python_exception(&interns, &source))?;
 
         // Start execution from index 0 (beginning of code)
         let position_tracker = PositionTracker::default();
         self.executor
             .run_from_position(heap, namespaces, position_tracker, writer)
+            .map_err(|e| e.into_python_exception(&interns, &source))
     }
 }

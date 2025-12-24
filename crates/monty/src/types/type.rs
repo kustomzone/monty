@@ -1,7 +1,7 @@
 use strum::{Display, EnumString, IntoStaticStr};
 
 use crate::args::ArgValues;
-use crate::exceptions::ExcType;
+use crate::exception::ExcType;
 use crate::heap::Heap;
 use crate::intern::Interns;
 use crate::resource::ResourceTracker;

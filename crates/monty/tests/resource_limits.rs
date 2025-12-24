@@ -4,7 +4,7 @@
 /// allocation limits, time limits, and triggers garbage collection.
 use std::time::Duration;
 
-use monty::{Executor, ExecutorIter, PyObject, ResourceLimits, RunError, StdPrint};
+use monty::{ExcType, Executor, ExecutorIter, PyObject, ResourceLimits, StdPrint};
 
 /// Test that allocation limits return an error.
 #[test]
@@ -22,16 +22,14 @@ result
 
     // Should fail due to allocation limit
     assert!(result.is_err(), "should exceed allocation limit");
-    match result.unwrap_err() {
-        RunError::Resource(err) => {
-            let msg = err.to_string();
-            assert!(
-                msg.contains("allocation limit exceeded"),
-                "expected allocation limit error, got: {msg}"
-            );
-        }
-        other => panic!("expected Resource error, got: {other}"),
-    }
+    let exc = result.unwrap_err();
+    assert_eq!(exc.exc_type, ExcType::MemoryError);
+    assert!(
+        exc.message
+            .as_ref()
+            .is_some_and(|m| m.contains("allocation limit exceeded")),
+        "expected allocation limit error, got: {exc}"
+    );
 }
 
 #[test]
@@ -69,16 +67,12 @@ x
 
     // Should fail due to time limit
     assert!(result.is_err(), "should exceed time limit");
-    match result.unwrap_err() {
-        RunError::Resource(err) => {
-            let msg = err.to_string();
-            assert!(
-                msg.contains("time limit exceeded"),
-                "expected time limit error, got: {msg}"
-            );
-        }
-        other => panic!("expected Resource error, got: {other}"),
-    }
+    let exc = result.unwrap_err();
+    assert_eq!(exc.exc_type, ExcType::TimeoutError);
+    assert!(
+        exc.message.as_ref().is_some_and(|m| m.contains("time limit exceeded")),
+        "expected time limit error, got: {exc}"
+    );
 }
 
 #[test]
@@ -114,16 +108,14 @@ result
 
     // Should fail due to memory limit
     assert!(result.is_err(), "should exceed memory limit");
-    match result.unwrap_err() {
-        RunError::Resource(err) => {
-            let msg = err.to_string();
-            assert!(
-                msg.contains("memory limit exceeded"),
-                "expected memory limit error, got: {msg}"
-            );
-        }
-        other => panic!("expected Resource error, got: {other}"),
-    }
+    let exc = result.unwrap_err();
+    assert_eq!(exc.exc_type, ExcType::MemoryError);
+    assert!(
+        exc.message
+            .as_ref()
+            .is_some_and(|m| m.contains("memory limit exceeded")),
+        "expected memory limit error, got: {exc}"
+    );
 }
 
 #[test]
@@ -202,16 +194,14 @@ fn executor_iter_resource_limit_on_resume() {
     // Resume - should fail due to allocation limit during the for loop
     let result = state.run(PyObject::None, &mut StdPrint);
     assert!(result.is_err(), "should exceed allocation limit on resume");
-    match result.unwrap_err() {
-        RunError::Resource(err) => {
-            let msg = err.to_string();
-            assert!(
-                msg.contains("allocation limit exceeded"),
-                "expected allocation limit error, got: {msg}"
-            );
-        }
-        other => panic!("expected Resource error, got: {other}"),
-    }
+    let exc = result.unwrap_err();
+    assert_eq!(exc.exc_type, ExcType::MemoryError);
+    assert!(
+        exc.message
+            .as_ref()
+            .is_some_and(|m| m.contains("allocation limit exceeded")),
+        "expected allocation limit error, got: {exc}"
+    );
 }
 
 #[test]
@@ -229,16 +219,14 @@ fn executor_iter_resource_limit_before_function_call() {
     let result = exec.run_with_limits(vec![], limits, &mut StdPrint);
 
     assert!(result.is_err(), "should exceed allocation limit before function call");
-    match result.unwrap_err() {
-        RunError::Resource(err) => {
-            let msg = err.to_string();
-            assert!(
-                msg.contains("allocation limit exceeded"),
-                "expected allocation limit error, got: {msg}"
-            );
-        }
-        other => panic!("expected Resource error, got: {other}"),
-    }
+    let exc = result.unwrap_err();
+    assert_eq!(exc.exc_type, ExcType::MemoryError);
+    assert!(
+        exc.message
+            .as_ref()
+            .is_some_and(|m| m.contains("allocation limit exceeded")),
+        "expected allocation limit error, got: {exc}"
+    );
 }
 
 #[test]
@@ -286,4 +274,91 @@ fn executor_iter_resource_limit_multiple_function_calls() {
         .into_complete()
         .expect("complete");
     assert_eq!(result, PyObject::Int(4));
+}
+
+/// Test that deep recursion triggers memory limit due to namespace tracking.
+///
+/// Function call namespaces (local variables) are tracked by ResourceTracker.
+/// Each recursive call creates a new namespace, which should count against
+/// the memory limit.
+#[test]
+#[cfg_attr(
+    feature = "dec-ref-check",
+    ignore = "resource exhaustion doesn't guarantee heap state consistency"
+)]
+fn recursion_respects_memory_limit() {
+    // Recursive function that creates stack frames with local variables
+    let code = r"
+def recurse(n):
+    x = 1
+    if n > 0:
+        return recurse(n - 1)
+    return 0
+recurse(1000)
+";
+    let ex = Executor::new(code, "test.py", &[]).unwrap();
+
+    // Very tight memory limit - should fail due to namespace memory
+    // Each frame needs at least namespace_size * size_of::<Value>() bytes
+    let limits = ResourceLimits::new().max_memory(1000);
+    let result = ex.run_with_limits(vec![], limits);
+
+    assert!(result.is_err(), "should exceed memory limit from recursion");
+    let exc = result.unwrap_err();
+    assert_eq!(exc.exc_type, ExcType::MemoryError);
+    assert!(
+        exc.message
+            .as_ref()
+            .is_some_and(|m| m.contains("memory limit exceeded")),
+        "expected memory limit error, got: {exc}"
+    );
+}
+
+/// Test that recursion depth limit returns an error.
+#[test]
+#[cfg_attr(
+    feature = "dec-ref-check",
+    ignore = "resource exhaustion doesn't guarantee heap state consistency"
+)]
+fn recursion_depth_limit_exceeded() {
+    let code = r"
+def recurse(n):
+    if n > 0:
+        return recurse(n - 1)
+    return 0
+recurse(100)
+";
+    let ex = Executor::new(code, "test.py", &[]).unwrap();
+
+    // Set recursion limit to 10
+    let limits = ResourceLimits::new().max_recursion_depth(Some(10));
+    let result = ex.run_with_limits(vec![], limits);
+
+    assert!(result.is_err(), "should exceed recursion depth limit");
+    let exc = result.unwrap_err();
+    assert_eq!(exc.exc_type, ExcType::RecursionError);
+    assert!(
+        exc.message
+            .as_ref()
+            .is_some_and(|m| m.contains("maximum recursion depth exceeded")),
+        "expected recursion depth error, got: {exc}"
+    );
+}
+
+#[test]
+fn recursion_depth_limit_not_exceeded() {
+    let code = r"
+def recurse(n):
+    if n > 0:
+        return recurse(n - 1)
+    return 0
+recurse(5)
+";
+    let ex = Executor::new(code, "test.py", &[]).unwrap();
+
+    // Set recursion limit to 10 - should succeed with 5 levels
+    let limits = ResourceLimits::new().max_recursion_depth(Some(10));
+    let result = ex.run_with_limits(vec![], limits);
+
+    assert!(result.is_ok(), "should not exceed recursion depth limit");
 }

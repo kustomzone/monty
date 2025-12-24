@@ -1,9 +1,7 @@
 use crate::args::ArgValues;
 use crate::evaluate::{EvalResult, EvaluateExpr};
-use crate::exceptions::{
-    exc_err_static, exc_fmt, internal_err, ExcType, InternalRunError, RunError, SimpleException, StackFrame,
-};
-use crate::expressions::{ExprLoc, Identifier, NameScope, Node};
+use crate::exception::{exc_err_static, exc_fmt, ExcType, RawStackFrame, RunError, SimpleException};
+use crate::expressions::{Expr, ExprLoc, Identifier, Literal, NameScope, Node};
 use crate::for_iterator::ForIterator;
 use crate::heap::{Heap, HeapData};
 use crate::intern::{FunctionId, Interns, StringId, MODULE_STRING_ID};
@@ -38,8 +36,6 @@ pub type RunResult<T> = Result<T, RunError>;
 pub struct RunFrame<'i, P: AbstractPositionTracker, W: PrintWriter> {
     /// Index of this frame's local namespace in Namespaces.
     local_idx: NamespaceId,
-    /// Parent stack frame for error reporting.
-    parent: Option<StackFrame>,
     /// The name of the current frame (function name or "<module>").
     /// Uses string id to lookup
     name: StringId,
@@ -72,7 +68,6 @@ impl<'i, P: AbstractPositionTracker, W: PrintWriter> RunFrame<'i, P, W> {
     pub fn module_frame(interns: &'i Interns, position_tracker: &'i mut P, writer: &'i mut W) -> Self {
         Self {
             local_idx: GLOBAL_NS_IDX,
-            parent: None,
             name: MODULE_STRING_ID,
             interns,
             position_tracker,
@@ -91,20 +86,17 @@ impl<'i, P: AbstractPositionTracker, W: PrintWriter> RunFrame<'i, P, W> {
     /// # Arguments
     /// * `local_idx` - Index of the function's local namespace in Namespaces
     /// * `name` - The function name StringId (for error messages)
-    /// * `parent` - Parent stack frame for error traceback
     /// * `position_tracker` - Tracker for the current position in the code
     /// * `writer` - Writer for print output
     pub fn function_frame(
         local_idx: NamespaceId,
         name: StringId,
-        parent: Option<StackFrame>,
         interns: &'i Interns,
         position_tracker: &'i mut P,
         writer: &'i mut W,
     ) -> Self {
         Self {
             local_idx,
-            parent,
             name,
             interns,
             position_tracker,
@@ -164,7 +156,10 @@ impl<'i, P: AbstractPositionTracker, W: PrintWriter> RunFrame<'i, P, W> {
         clause_state: Option<ClauseState>,
     ) -> RunResult<Option<FrameExit>> {
         // Check time limit at statement boundaries
-        heap.tracker().check_time()?;
+        heap.tracker().check_time().map_err(|e| {
+            let frame = node.position().map(|pos| self.stack_frame(pos));
+            RunError::UncatchableExc(e.into_exception(frame))
+        })?;
 
         // Trigger garbage collection if scheduler says it's time.
         // GC runs at statement boundaries because:
@@ -185,7 +180,7 @@ impl<'i, P: AbstractPositionTracker, W: PrintWriter> RunFrame<'i, P, W> {
                     Ok(EvalResult::Value(())) => {}
                     Ok(EvalResult::ExternalCall(ext_call)) => return Ok(Some(FrameExit::ExternalCall(ext_call))),
                     Err(mut e) => {
-                        set_name(self.name, &mut e);
+                        add_frame_info(self.name, expr.position, &mut e);
                         return Err(e);
                     }
                 }
@@ -238,7 +233,10 @@ impl<'i, P: AbstractPositionTracker, W: PrintWriter> RunFrame<'i, P, W> {
             }
             Node::If { test, body, or_else } => {
                 let if_test = match clause_state {
-                    Some(ClauseState::If(resume_test)) => &resume_test.into(),
+                    Some(ClauseState::If(resume_test)) => &ExprLoc {
+                        position: CodeRange::default(),
+                        expr: Expr::Literal(Literal::Bool(resume_test)),
+                    },
                     _ => test,
                 };
                 if let Some(exit_frame) = self.if_(namespaces, heap, if_test, body, or_else)? {
@@ -260,7 +258,7 @@ impl<'i, P: AbstractPositionTracker, W: PrintWriter> RunFrame<'i, P, W> {
         match EvaluateExpr::new(namespaces, self.local_idx, heap, self.interns, self.writer).evaluate_use(expr) {
             Ok(value) => Ok(value),
             Err(mut e) => {
-                set_name(self.name, &mut e);
+                add_frame_info(self.name, expr.position, &mut e);
                 Err(e)
             }
         }
@@ -275,7 +273,7 @@ impl<'i, P: AbstractPositionTracker, W: PrintWriter> RunFrame<'i, P, W> {
         match EvaluateExpr::new(namespaces, self.local_idx, heap, self.interns, self.writer).evaluate_bool(expr) {
             Ok(value) => Ok(value),
             Err(mut e) => {
-                set_name(self.name, &mut e);
+                add_frame_info(self.name, expr.position, &mut e);
                 Err(e)
             }
         }
@@ -299,7 +297,8 @@ impl<'i, P: AbstractPositionTracker, W: PrintWriter> RunFrame<'i, P, W> {
                 Value::Exc(_) => {
                     // Match on the reference then use into_exc() due to issues with destructuring Value
                     let exc = value.into_exc();
-                    return Err(exc.with_frame(self.stack_frame(exc_expr.position)).into());
+                    // Use raise_frame so traceback won't show caret for raise statement
+                    return Err(exc.with_frame(self.raise_frame(exc_expr.position)).into());
                 }
                 Value::Builtin(builtin) => {
                     // Callable is inline - call it to get the exception
@@ -308,7 +307,8 @@ impl<'i, P: AbstractPositionTracker, W: PrintWriter> RunFrame<'i, P, W> {
                     if matches!(&result, Value::Exc(_)) {
                         // No need to drop value - Callable is Copy and doesn't need cleanup
                         let exc = result.into_exc();
-                        return Err(exc.with_frame(self.stack_frame(exc_expr.position)).into());
+                        // Use raise_frame so traceback won't show caret for raise statement
+                        return Err(exc.with_frame(self.raise_frame(exc_expr.position)).into());
                     }
                 }
                 _ => {}
@@ -316,7 +316,7 @@ impl<'i, P: AbstractPositionTracker, W: PrintWriter> RunFrame<'i, P, W> {
             value.drop_with_heap(heap);
             exc_err_static!(ExcType::TypeError; "exceptions must derive from BaseException")
         } else {
-            internal_err!(InternalRunError::TodoError; "plain raise not yet supported")
+            Err(RunError::internal("plain raise not yet supported"))
         }
     }
 
@@ -445,7 +445,7 @@ impl<'i, P: AbstractPositionTracker, W: PrintWriter> RunFrame<'i, P, W> {
                     cell_value.drop_with_heap(heap);
                     Ok(new_val)
                 }
-                _ => return internal_err!(InternalRunError::TodoError; "Assign operator {op:?} not yet implemented"),
+                _ => return Err(RunError::internal("assign operator not yet implemented")),
             };
             match result? {
                 Some(new_value) => {
@@ -535,7 +535,7 @@ impl<'i, P: AbstractPositionTracker, W: PrintWriter> RunFrame<'i, P, W> {
                         Ok(None)
                     }
                 }
-                _ => return internal_err!(InternalRunError::TodoError; "Assign operator {op:?} not yet implemented"),
+                _ => return Err(RunError::internal("assign operator not yet implemented")),
             };
             match result? {
                 Some(()) => None,
@@ -747,15 +747,27 @@ impl<'i, P: AbstractPositionTracker, W: PrintWriter> RunFrame<'i, P, W> {
         Ok(())
     }
 
-    fn stack_frame(&self, position: CodeRange) -> StackFrame {
-        StackFrame::new(position, self.name, self.parent.as_ref())
+    fn stack_frame(&self, position: CodeRange) -> RawStackFrame {
+        // Create frame without parent - the parent chain is built up by add_frame_info()
+        // as the error propagates through the call stack
+        RawStackFrame::new(position, self.name, None)
+    }
+
+    /// Creates a stack frame for a raise statement (no caret shown in traceback).
+    fn raise_frame(&self, position: CodeRange) -> RawStackFrame {
+        RawStackFrame::from_raise(position, self.name)
     }
 }
 
-fn set_name(name: StringId, error: &mut RunError) {
-    if let RunError::Exc(ref mut exc) = error {
-        if let Some(ref mut stack_frame) = exc.frame {
-            stack_frame.frame_name = Some(name);
+/// Adds the caller's frame to an error as it propagates up the call stack.
+///
+/// This builds the traceback chain by appending each caller's frame information
+/// to the exception, so the full call stack is visible when the error is displayed.
+fn add_frame_info(name: StringId, position: CodeRange, error: &mut RunError) {
+    match error {
+        RunError::Exc(ref mut exc) | RunError::UncatchableExc(ref mut exc) => {
+            exc.add_caller_frame(position, name);
         }
+        RunError::Internal(_) => {}
     }
 }

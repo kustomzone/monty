@@ -13,7 +13,7 @@ use std::fmt::Write;
 use ahash::AHashSet;
 
 use crate::args::ArgValues;
-use crate::exceptions::ExcType;
+use crate::exception::ExcType;
 
 use super::Type;
 use crate::heap::{Heap, HeapId};
@@ -272,7 +272,7 @@ pub trait PyTrait {
         _interns: &Interns,
     ) -> RunResult<()> {
         Err(ExcType::TypeError).map_err(|e| {
-            crate::exceptions::exc_fmt!(e; "'{}' object does not support item assignment", self.py_type(Some(heap)))
+            crate::exception::exc_fmt!(e; "'{}' object does not support item assignment", self.py_type(Some(heap)))
                 .into()
         })
     }

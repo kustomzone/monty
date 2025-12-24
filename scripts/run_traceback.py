@@ -1,0 +1,92 @@
+"""
+Run a Python file and return formatted traceback for testing.
+
+This script uses runpy.run_path() to execute a file, ensuring full traceback
+information (including caret lines) is preserved. The file path in the traceback
+is replaced with 'test_file.py'.
+"""
+
+import os
+import re
+import runpy
+import sys
+import traceback
+
+
+def run_file_and_get_traceback(file_path: str, recursion_limit: int | None = None) -> str | None:
+    """
+    Execute a Python file and return the formatted traceback if an exception occurs.
+
+    The traceback will have the basename as the filename for the executed code,
+    with caret lines (`~~~~~`) properly shown for all frames.
+
+    Args:
+        file_path: Path to the Python file to execute.
+        recursion_limit: Recursion limit for execution. CPython adds ~5 frames
+            of overhead for runpy, so the effective limit for user code is
+            approximately recursion_limit - 5.
+
+    Returns:
+        Formatted traceback string with '^' replaced by '~', or None if no exception.
+    """
+    # Get absolute path for consistent replacement
+    abs_path = os.path.abspath(file_path)
+    file_name = os.path.basename(abs_path)
+
+    # Set recursion limit for testing.
+    if recursion_limit is not None:
+        sys.setrecursionlimit(recursion_limit + 5)
+
+    try:
+        # Execute via runpy - this preserves full traceback info
+        runpy.run_path(abs_path, run_name='__main__')
+        return None  # No exception
+    except SystemExit:
+        return None  # sys.exit() is not an error
+    except BaseException as e:
+        # Format the traceback
+        stack = traceback.format_exception(type(e), e, e.__traceback__)
+
+        result_frames: list[str] = []
+        skip_until_test_file = True
+
+        for frame in stack:
+            if skip_until_test_file:
+                # Keep the "Traceback (most recent call last):" header
+                if frame.startswith('Traceback'):
+                    result_frames.append(frame)
+                # Skip until we see our test file
+                if frame.startswith(f'  File "{abs_path}"'):
+                    skip_until_test_file = False
+                    result_frames.append(frame.replace(abs_path, file_name))
+            else:
+                result_frames.append(frame.replace(abs_path, file_name))
+
+        # Restore a high limit for traceback formatting
+        sys.setrecursionlimit(1000)
+        lines = (''.join(result_frames)).splitlines()
+        return '\n'.join(map(normalize_debug_range, lines)).rstrip()
+
+
+def normalize_debug_range(line: str) -> str:
+    if re.fullmatch(r' +[\~\^]+', line):
+        return line.replace('^', '~')
+    else:
+        return line
+
+
+if __name__ == '__main__':
+    if len(sys.argv) != 2:
+        print(f'Usage: {sys.argv[0]} <file.py>', file=sys.stderr)
+        sys.exit(1)
+
+    file_path = sys.argv[1]
+    if not os.path.exists(file_path):
+        print(f'Error: File not found: {file_path}', file=sys.stderr)
+        sys.exit(1)
+
+    result = run_file_and_get_traceback(file_path)
+    if result:
+        print(result)
+    else:
+        print('No exception raised')

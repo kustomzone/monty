@@ -1,3 +1,3 @@
-# skip=cpython
+# xfail=cpython
 id([]) == id([])
 # Return=False

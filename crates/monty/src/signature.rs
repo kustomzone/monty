@@ -5,7 +5,7 @@
 //! It also handles default values and the argument binding algorithm.
 
 use crate::args::{ArgValues, KwargsValues};
-use crate::exceptions::{ExcType, SimpleException};
+use crate::exception::{ExcType, SimpleException};
 use crate::expressions::Identifier;
 use crate::heap::{Heap, HeapData};
 use crate::intern::{Interns, StringId};

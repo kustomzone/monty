@@ -1,6 +1,9 @@
 use std::fmt;
 use std::time::{Duration, Instant};
 
+use crate::exception::{ExceptionRaise, RawStackFrame, RunError, SimpleException};
+use crate::ExcType;
+
 /// Error returned when a resource limit is exceeded during execution.
 ///
 /// This allows the sandbox to enforce strict limits on allocation count,
@@ -13,6 +16,8 @@ pub enum ResourceError {
     Time { limit: Duration, elapsed: Duration },
     /// Maximum memory usage exceeded.
     Memory { limit: usize, used: usize },
+    /// Maximum recursion depth exceeded.
+    Recursion { limit: usize, depth: usize },
 }
 
 impl fmt::Display for ResourceError {
@@ -27,11 +32,53 @@ impl fmt::Display for ResourceError {
             Self::Memory { limit, used } => {
                 write!(f, "memory limit exceeded: {used} bytes > {limit} bytes")
             }
+            Self::Recursion { .. } => {
+                write!(f, "maximum recursion depth exceeded")
+            }
         }
     }
 }
 
 impl std::error::Error for ResourceError {}
+
+impl ResourceError {
+    /// Converts this resource error to a Python exception with optional stack frame.
+    ///
+    /// Maps resource error types to Python exception types:
+    /// - `Allocation` → `MemoryError`
+    /// - `Memory` → `MemoryError`
+    /// - `Time` → `TimeoutError`
+    /// - `Recursion` → `RecursionError`
+    #[must_use]
+    pub(crate) fn into_exception(self, frame: Option<RawStackFrame>) -> ExceptionRaise {
+        let (exc_type, msg) = match self {
+            Self::Allocation { limit, count } => (
+                ExcType::MemoryError,
+                format!("allocation limit exceeded: {count} > {limit}"),
+            ),
+            Self::Memory { limit, used } => (
+                ExcType::MemoryError,
+                format!("memory limit exceeded: {used} bytes > {limit} bytes"),
+            ),
+            Self::Time { limit, elapsed } => (
+                ExcType::TimeoutError,
+                format!("time limit exceeded: {elapsed:?} > {limit:?}"),
+            ),
+            Self::Recursion { .. } => (ExcType::RecursionError, "maximum recursion depth exceeded".to_string()),
+        };
+        let exc = SimpleException::new(exc_type, Some(msg));
+        match frame {
+            Some(f) => exc.with_frame(f),
+            None => exc.into(),
+        }
+    }
+}
+
+impl From<ResourceError> for RunError {
+    fn from(err: ResourceError) -> Self {
+        Self::UncatchableExc(err.into_exception(None))
+    }
+}
 
 /// Trait for tracking resource usage and scheduling garbage collection.
 ///
@@ -76,6 +123,15 @@ pub trait ResourceTracker: fmt::Debug {
     ///
     /// Used to reset internal counters (e.g., allocations since last GC).
     fn on_gc_complete(&mut self);
+
+    /// Called before pushing a new call frame to check recursion depth.
+    ///
+    /// Returns `Ok(())` if within recursion limit, or `Err(ResourceError::Recursion)`
+    /// if the limit would be exceeded.
+    ///
+    /// # Arguments
+    /// * `current_depth` - Current call stack depth (before the new frame is pushed)
+    fn check_recursion_depth(&self, current_depth: usize) -> Result<(), ResourceError>;
 }
 
 /// Default GC interval for `NoLimitTracker` - run GC every 100,000 allocations.
@@ -89,6 +145,8 @@ const DEFAULT_GC_INTERVAL: usize = 100_000;
 /// This tracker does not enforce any resource limits (allocations, time, memory),
 /// but still triggers garbage collection periodically to collect reference cycles.
 /// GC runs every 100,000 allocations by default.
+///
+/// Recursion limit is set to the cpython default of 1000.
 #[derive(Debug, Default, Clone)]
 pub struct NoLimitTracker {
     /// Number of allocations since last garbage collection.
@@ -119,6 +177,23 @@ impl ResourceTracker for NoLimitTracker {
     fn on_gc_complete(&mut self) {
         self.allocations_since_gc = 0;
     }
+
+    /// Set the recursion limit to 1000.
+    ///
+    /// The high limit here may cause stack overflow errors in debug mode, but do not those errors should
+    /// not occur with release builds.
+    #[inline]
+    fn check_recursion_depth(&self, current_depth: usize) -> Result<(), ResourceError> {
+        const DEFAULT_RECURSION_LIMIT: usize = 1000;
+        if current_depth >= DEFAULT_RECURSION_LIMIT {
+            Err(ResourceError::Recursion {
+                limit: DEFAULT_RECURSION_LIMIT,
+                depth: current_depth + 1,
+            })
+        } else {
+            Ok(())
+        }
+    }
 }
 
 /// Configuration for resource limits.
@@ -136,13 +211,18 @@ pub struct ResourceLimits {
     pub max_memory: Option<usize>,
     /// Run garbage collection every N allocations.
     pub gc_interval: Option<usize>,
+    /// Maximum recursion depth (function call stack depth).
+    pub max_recursion_depth: Option<usize>,
 }
 
 impl ResourceLimits {
-    /// Creates a new ResourceLimits with all limits disabled.
+    /// Creates a new ResourceLimits with all limits disabled, except max recursion which is set to 1000.
     #[must_use]
     pub fn new() -> Self {
-        Self::default()
+        Self {
+            max_recursion_depth: Some(1000),
+            ..Default::default()
+        }
     }
 
     /// Sets the maximum number of allocations.
@@ -170,6 +250,13 @@ impl ResourceLimits {
     #[must_use]
     pub fn gc_interval(mut self, interval: usize) -> Self {
         self.gc_interval = Some(interval);
+        self
+    }
+
+    /// Sets the maximum recursion depth (function call stack depth).
+    #[must_use]
+    pub fn max_recursion_depth(mut self, limit: Option<usize>) -> Self {
+        self.max_recursion_depth = limit;
         self
     }
 }
@@ -281,5 +368,18 @@ impl ResourceTracker for LimitedTracker {
 
     fn on_gc_complete(&mut self) {
         self.allocations_since_gc = 0;
+    }
+
+    fn check_recursion_depth(&self, current_depth: usize) -> Result<(), ResourceError> {
+        if let Some(max) = self.limits.max_recursion_depth {
+            // current_depth is before push, so new depth would be current_depth + 1
+            if current_depth >= max {
+                return Err(ResourceError::Recursion {
+                    limit: max,
+                    depth: current_depth + 1,
+                });
+            }
+        }
+        Ok(())
     }
 }

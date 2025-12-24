@@ -195,15 +195,6 @@ pub struct ExprLoc {
     pub expr: Expr,
 }
 
-impl From<bool> for ExprLoc {
-    fn from(value: bool) -> Self {
-        Self {
-            position: CodeRange::default(),
-            expr: Expr::Literal(Literal::Bool(value)),
-        }
-    }
-}
-
 impl ExprLoc {
     pub fn new(position: CodeRange, expr: Expr) -> Self {
         Self { position, expr }
@@ -247,4 +238,28 @@ pub enum Node {
         or_else: Vec<Node>,
     },
     FunctionDef(FunctionId),
+}
+
+impl Node {
+    /// Returns the source code position of this node, if available.
+    ///
+    /// Most nodes have position info through their expressions. Some nodes
+    /// like `ReturnNone` don't have inherent position info and return `None`.
+    #[must_use]
+    pub fn position(&self) -> Option<CodeRange> {
+        match self {
+            Self::Expr(expr) => Some(expr.position),
+            Self::Return(expr) => Some(expr.position),
+            Self::ReturnNone => None,
+            Self::Raise(Some(expr)) => Some(expr.position),
+            Self::Raise(None) => None,
+            Self::Assert { test, .. } => Some(test.position),
+            Self::Assign { object, .. } => Some(object.position),
+            Self::OpAssign { object, .. } => Some(object.position),
+            Self::SubscriptAssign { value, .. } => Some(value.position),
+            Self::For { iter, .. } => Some(iter.position),
+            Self::If { test, .. } => Some(test.position),
+            Self::FunctionDef(_) => None,
+        }
+    }
 }

@@ -38,7 +38,13 @@ jobs:
 
       - uses: dtolnay/rust-toolchain@stable
 
+      # this means pyo3 will use Python 3.13 in tests
+      - uses: actions/setup-python@v6
+        with:
+          python-version: "3.13"
+
       - run: rustc --version --verbose
+      - run: python3 -V
 
       - name: Test without ref-counting feature or dec-ref-check
         run: cargo test --workspace

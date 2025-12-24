@@ -1,4 +1,3 @@
-# skip=cpython
 # Mutual reference cycle: a contains b, b contains a
 # This creates a cycle where:
 #   - a has refcount 2 (variable 'a' + being inside b)

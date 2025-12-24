@@ -1,4 +1,3 @@
-# skip=cpython
 # Self-referential list: a contains itself
 # This creates a cycle where a's refcount is 2 (variable + self-reference)
 # Without cycle detection, when 'a' goes out of scope, refcount drops to 1

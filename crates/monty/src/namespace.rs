@@ -1,8 +1,8 @@
-use crate::exceptions::{ExcType, SimpleException};
+use crate::exception::ExcType;
 use crate::expressions::{Identifier, NameScope};
 use crate::heap::{Heap, HeapId};
 use crate::intern::Interns;
-use crate::resource::ResourceTracker;
+use crate::resource::{ResourceError, ResourceTracker};
 use crate::run_frame::RunResult;
 use crate::value::Value;
 
@@ -159,27 +159,55 @@ impl Namespaces {
         &mut self.stack[idx.index()]
     }
 
-    /// Creates a new namespace for a function call, returns its index.
+    /// Creates a new namespace for a function call with memory and recursion tracking.
     ///
-    /// The new namespace is initialized with `Object::Undefined` values.
-    /// Call `pop_with_heap()` when the function returns to clean up.
-    pub fn push(&mut self, namespace: Vec<Value>) -> NamespaceId {
+    /// This method:
+    /// 1. Checks recursion depth limit (fails fast before allocating)
+    /// 2. Tracks namespace memory usage through the heap's `ResourceTracker`
+    ///
+    /// # Arguments
+    /// * `namespace` - The vector of local variable slots for the function
+    /// * `heap` - The heap, used to access the resource tracker for memory accounting
+    ///
+    /// # Returns
+    /// * `Ok(NamespaceId)` - Index of the new namespace
+    /// * `Err(ResourceError::Recursion)` - If adding this namespace would exceed recursion limit
+    /// * `Err(ResourceError::Memory)` - If adding this namespace would exceed memory limits
+    pub fn push_with_heap(
+        &mut self,
+        namespace: Vec<Value>,
+        heap: &mut Heap<impl ResourceTracker>,
+    ) -> Result<NamespaceId, ResourceError> {
+        // Check recursion depth BEFORE memory allocation (fail fast)
+        // Depth excludes global namespace (stack[0]), so current depth = stack.len() - 1
+        let current_depth = self.stack.len() - 1;
+        heap.tracker().check_recursion_depth(current_depth)?;
+
+        // Track the memory used by this namespace's slots
+        let size = namespace.len() * std::mem::size_of::<Value>();
+        heap.tracker_mut().on_allocate(|| size)?;
+
         let idx = NamespaceId(self.stack.len().try_into().expect("NamespaceId overflow"));
         self.stack.push(Namespace(namespace));
-        idx
+        Ok(idx)
     }
 
     /// Removes the most recently added namespace (after function returns),
     /// properly cleaning up any heap-allocated values.
     ///
-    /// This method decrements reference counts for any `Value::Ref` entries
-    /// in the namespace before removing it.
+    /// This method:
+    /// 1. Tracks the freed memory through the heap's `ResourceTracker`
+    /// 2. Decrements reference counts for any `Value::Ref` entries in the namespace
     ///
     /// # Panics
     /// Panics if attempting to pop the global namespace (index 0).
     pub fn pop_with_heap(&mut self, heap: &mut Heap<impl ResourceTracker>) {
         debug_assert!(self.stack.len() > 1, "cannot pop global namespace");
         if let Some(namespace) = self.stack.pop() {
+            // Track the freed memory for this namespace
+            let size = namespace.0.len() * std::mem::size_of::<Value>();
+            heap.tracker_mut().on_free(|| size);
+
             for value in namespace.0 {
                 value.drop_with_heap(heap);
             }
@@ -236,11 +264,9 @@ impl Namespaces {
                 return Ok(value);
             }
         }
-        Err(
-            SimpleException::new(ExcType::NameError, Some(interns.get_str(ident.name_id).to_string()))
-                .with_position(ident.position)
-                .into(),
-        )
+        Err(ExcType::name_error(interns.get_str(ident.name_id))
+            .with_position(ident.position)
+            .into())
     }
 
     /// Looks up a variable by name in the appropriate namespace based on the scope index.
@@ -268,11 +294,9 @@ impl Namespaces {
                 return Ok(value);
             }
         }
-        Err(
-            SimpleException::new(ExcType::NameError, Some(interns.get_str(ident.name_id).to_string()))
-                .with_position(ident.position)
-                .into(),
-        )
+        Err(ExcType::name_error(interns.get_str(ident.name_id))
+            .with_position(ident.position)
+            .into())
     }
 
     /// Gets a variable's value, handling Local, Global, and Cell scopes.

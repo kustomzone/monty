@@ -2,7 +2,7 @@ use std::cmp::Ordering;
 
 use crate::args::{ArgExprs, ArgValues, Kwarg, KwargsValues};
 use crate::callable::Callable;
-use crate::exceptions::{exc_err_fmt, internal_err, ExcType, InternalRunError, SimpleException};
+use crate::exception::{exc_err_fmt, ExcType, RunError, SimpleException};
 use crate::expressions::{Expr, ExprLoc, Identifier, NameScope};
 use crate::fstring::{fstring_interpolation, ConversionFlag, FStringPart};
 
@@ -163,7 +163,7 @@ impl<'h, 's, T: ResourceTracker, W: PrintWriter> EvaluateExpr<'h, 's, T, W> {
                     Value::Int(n) => Ok(EvalResult::Value(Value::Int(-n))),
                     Value::Float(f) => Ok(EvalResult::Value(Value::Float(-f))),
                     _ => {
-                        use crate::exceptions::{exc_fmt, ExcType};
+                        use crate::exception::{exc_fmt, ExcType};
                         let type_name = val.py_type(Some(self.heap));
                         // Drop the value before returning error to avoid ref counting leak
                         val.drop_with_heap(self.heap);
@@ -259,8 +259,15 @@ impl<'h, 's, T: ResourceTracker, W: PrintWriter> EvaluateExpr<'h, 's, T, W> {
                 Ok(EvalResult::Value(()))
             }
             Expr::Subscript { object, index } => {
-                return_ext_call!(self.evaluate_discard(object)?);
-                return_ext_call!(self.evaluate_discard(index)?);
+                // Must actually perform the subscript to catch IndexError, KeyError, etc.
+                let obj = return_ext_call!(self.evaluate_use(object)?);
+                let key = return_ext_call!(self.evaluate_use(index)?);
+                let result = obj.py_getitem(&key, self.heap, self.interns);
+                // Drop temporary references (even on error)
+                obj.drop_with_heap(self.heap);
+                key.drop_with_heap(self.heap);
+                // Drop result if successful, propagate error if not
+                result?.drop_with_heap(self.heap);
                 Ok(EvalResult::Value(()))
             }
             Expr::Dict(pairs) => {
@@ -349,7 +356,7 @@ impl<'h, 's, T: ResourceTracker, W: PrintWriter> EvaluateExpr<'h, 's, T, W> {
                 // Drop temporary references before early return
                 lhs.drop_with_heap(self.heap);
                 rhs.drop_with_heap(self.heap);
-                return internal_err!(InternalRunError::TodoError; "Operator {op:?} not yet implemented");
+                return Err(RunError::internal(format!("Operator {op:?} not yet implemented")));
             }
         };
         if let Some(object) = op_result {

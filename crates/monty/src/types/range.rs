@@ -8,7 +8,7 @@ use std::fmt::Write;
 use ahash::AHashSet;
 
 use crate::args::ArgValues;
-use crate::exceptions::ExcType;
+use crate::exception::ExcType;
 use crate::heap::{Heap, HeapId};
 use crate::intern::Interns;
 use crate::resource::ResourceTracker;
