@@ -24,7 +24,8 @@
       "Bash(gh pr view:*)",
       "Bash(gh api:*)",
       "WebFetch(domain:docs.anthropic.com)",
-      "Skill(python-playground)"
+      "Skill(python-playground)",
+      "Skill(fastmod)"
     ],
     "deny": [],
     "ask": []

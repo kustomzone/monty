@@ -38,7 +38,7 @@ impl Callable {
     /// * `heap` - The heap for allocating objects
     /// * `args` - The arguments to pass to the callable
     /// * `interns` - String storage for looking up interned names in error messages
-    /// * `writer` - The writer for print output
+    /// * `print` - The print for print output
     pub fn call(
         &self,
         namespaces: &mut Namespaces,
@@ -46,21 +46,21 @@ impl Callable {
         heap: &mut Heap<impl ResourceTracker>,
         args: ArgValues,
         interns: &Interns,
-        writer: &mut impl PrintWriter,
+        print: &mut impl PrintWriter,
     ) -> RunResult<EvalResult<Value>> {
         match self {
-            Callable::Builtin(b) => b.call(heap, args, interns, writer).map(EvalResult::Value),
+            Callable::Builtin(b) => b.call(heap, args, interns, print).map(EvalResult::Value),
             Callable::Name(ident) => {
                 // Look up the callable in the namespace
                 let value = namespaces.get_var(local_idx, ident, interns)?;
 
                 match value {
-                    Value::Builtin(builtin) => return builtin.call(heap, args, interns, writer).map(EvalResult::Value),
+                    Value::Builtin(builtin) => return builtin.call(heap, args, interns, print).map(EvalResult::Value),
                     Value::Function(f_id) => {
                         // Simple function without defaults - pass empty slice
                         return interns
                             .get_function(*f_id)
-                            .call(namespaces, heap, args, &[], interns, writer)
+                            .call(namespaces, heap, args, &[], interns, print)
                             .map(EvalResult::Value);
                     }
                     Value::ExtFunction(f_id) => {
@@ -81,11 +81,11 @@ impl Callable {
                                 match data {
                                     HeapData::Closure(f_id, cells, defaults) => {
                                         let f = interns.get_function(*f_id);
-                                        f.call_with_cells(namespaces, heap, args, cells, defaults, interns, writer)
+                                        f.call_with_cells(namespaces, heap, args, cells, defaults, interns, print)
                                     }
                                     HeapData::FunctionDefaults(f_id, defaults) => {
                                         let f = interns.get_function(*f_id);
-                                        f.call(namespaces, heap, args, defaults, interns, writer)
+                                        f.call(namespaces, heap, args, defaults, interns, print)
                                     }
                                     _ => {
                                         // Not a callable heap type

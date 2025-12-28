@@ -1,5 +1,6 @@
-use crate::{evaluate::ExternalCall, value::Value};
 use std::fmt::Debug;
+
+use crate::{evaluate::ExternalCall, value::Value};
 
 /// Result of executing a frame - return, yield, or external function call.
 ///
@@ -19,9 +20,9 @@ pub enum FrameExit {
     ExternalCall(ExternalCall),
 }
 
-pub trait AbstractPositionTracker: Clone + Debug {
+pub trait AbstractSnapshotTracker: Clone + Debug {
     /// Get the next position to execute from
-    fn next(&mut self) -> Position;
+    fn next(&mut self) -> CodePosition;
 
     /// When suspending execution, set the position to resume from
     fn record(&mut self, index: usize);
@@ -34,11 +35,11 @@ pub trait AbstractPositionTracker: Clone + Debug {
 }
 
 #[derive(Debug, Clone)]
-pub struct NoPositionTracker;
+pub struct NoSnapshotTracker;
 
-impl AbstractPositionTracker for NoPositionTracker {
-    fn next(&mut self) -> Position {
-        Position::default()
+impl AbstractSnapshotTracker for NoSnapshotTracker {
+    fn next(&mut self) -> CodePosition {
+        CodePosition::default()
     }
 
     fn record(&mut self, _index: usize) {}
@@ -51,34 +52,27 @@ impl AbstractPositionTracker for NoPositionTracker {
 }
 
 #[derive(Debug, Clone, Default)]
-pub struct PositionTracker {
-    pub stack: Vec<Position>,
+pub struct SnapshotTracker {
+    pub stack: Vec<CodePosition>,
     clause_state: Option<ClauseState>,
-    incr: bool,
 }
 
-impl From<Vec<Position>> for PositionTracker {
-    fn from(stack: Vec<Position>) -> Self {
-        PositionTracker {
+impl From<Vec<CodePosition>> for SnapshotTracker {
+    fn from(stack: Vec<CodePosition>) -> Self {
+        SnapshotTracker {
             stack,
             ..Default::default()
         }
     }
 }
 
-impl AbstractPositionTracker for PositionTracker {
-    fn next(&mut self) -> Position {
+impl AbstractSnapshotTracker for SnapshotTracker {
+    fn next(&mut self) -> CodePosition {
         self.stack.pop().unwrap_or_default()
     }
 
     fn record(&mut self, index: usize) {
-        let index = if self.incr {
-            self.incr = false;
-            index + 1
-        } else {
-            index
-        };
-        self.stack.push(Position {
+        self.stack.push(CodePosition {
             index,
             clause_state: self.clause_state.take(),
         });
@@ -93,9 +87,9 @@ impl AbstractPositionTracker for PositionTracker {
     }
 }
 
-/// Represents a position within nested control flow for yield resumption.
+/// Represents a position within nested control flow for snapshotting and code resumption.
 #[derive(Debug, Clone, Copy, Default)]
-pub struct Position {
+pub struct CodePosition {
     /// Index of the next node to execute within the node array
     pub index: usize,
     /// indicates how to resume within the nested control flow if relevant

@@ -4,7 +4,7 @@
 /// allocation limits, time limits, and triggers garbage collection.
 use std::time::Duration;
 
-use monty::{ExcType, Executor, ExecutorIter, PyObject, ResourceLimits, StdPrint};
+use monty::{ExcType, Executor, PyObject, ResourceLimits, RunSnapshot, StdPrint};
 
 /// Test that allocation limits return an error.
 #[test]
@@ -15,7 +15,7 @@ for i in range(11):
     result.append(str(i))
 result
 ";
-    let ex = Executor::new(code, "test.py", &[]).unwrap();
+    let ex = Executor::new(code.to_owned(), "test.py", &[]).unwrap();
 
     let limits = ResourceLimits::new().max_allocations(4);
     let result = ex.run_with_limits(vec![], limits);
@@ -40,7 +40,7 @@ for i in range(9):
     result.append(str(i))
 result
 ";
-    let ex = Executor::new(code, "test.py", &[]).unwrap();
+    let ex = Executor::new(code.to_owned(), "test.py", &[]).unwrap();
 
     let limits = ResourceLimits::new().max_allocations(10);
     let result = ex.run_with_limits(vec![], limits);
@@ -59,7 +59,7 @@ for i in range(100000000):
     x = x + 1
 x
 ";
-    let ex = Executor::new(code, "test.py", &[]).unwrap();
+    let ex = Executor::new(code.to_owned(), "test.py", &[]).unwrap();
 
     // Set a short time limit
     let limits = ResourceLimits::new().max_duration(Duration::from_millis(50));
@@ -79,7 +79,7 @@ x
 fn time_limit_not_exceeded() {
     // Simple code that runs quickly
     let code = "x = 1 + 2\nx";
-    let ex = Executor::new(code, "test.py", &[]).unwrap();
+    let ex = Executor::new(code.to_owned(), "test.py", &[]).unwrap();
 
     // Set a generous time limit
     let limits = ResourceLimits::new().max_duration(Duration::from_secs(5));
@@ -100,7 +100,7 @@ for i in range(100):
     result.append([1, 2, 3, 4, 5])
 result
 ";
-    let ex = Executor::new(code, "test.py", &[]).unwrap();
+    let ex = Executor::new(code.to_owned(), "test.py", &[]).unwrap();
 
     // Set a very low memory limit (100 bytes) to trigger on nested list allocation
     let limits = ResourceLimits::new().max_memory(100);
@@ -122,7 +122,7 @@ result
 fn combined_limits() {
     // Test multiple limits together
     let code = "x = 1 + 2\nx";
-    let ex = Executor::new(code, "test.py", &[]).unwrap();
+    let ex = Executor::new(code.to_owned(), "test.py", &[]).unwrap();
 
     let limits = ResourceLimits::new()
         .max_allocations(1000)
@@ -142,7 +142,7 @@ for i in range(100):
     result.append(str(i))
 len(result)
 ";
-    let ex = Executor::new(code, "test.py", &[]).unwrap();
+    let ex = Executor::new(code.to_owned(), "test.py", &[]).unwrap();
 
     // Standard run should succeed
     let result = ex.run_no_limits(vec![]);
@@ -161,7 +161,7 @@ for i in range(100):
     result.append(i)
 len(result)
 ";
-    let ex = Executor::new(code, "test.py", &[]).unwrap();
+    let ex = Executor::new(code.to_owned(), "test.py", &[]).unwrap();
 
     // Set GC to run every 10 allocations
     let limits = ResourceLimits::new().gc_interval(10);
@@ -179,11 +179,11 @@ fn executor_iter_resource_limit_on_resume() {
     // Test that resource limits are enforced across function calls
     // First function call succeeds, but resumed execution exceeds limit
     let code = "foo(1)\nx = []\nfor i in range(10):\n    x.append(str(i))\nlen(x)";
-    let exec = ExecutorIter::new(code, "test.py", &[], vec!["foo".to_owned()]).unwrap();
+    let run = RunSnapshot::new(code.to_owned(), "test.py", &[], vec!["foo".to_owned()]).unwrap();
 
     // First function call should succeed with generous limit
     let limits = ResourceLimits::new().max_allocations(5);
-    let (name, args, _kwargs, state) = exec
+    let (name, args, _kwargs, state) = run
         .run_with_limits(vec![], limits, &mut StdPrint)
         .unwrap()
         .into_function_call()
@@ -212,11 +212,11 @@ fn executor_iter_resource_limit_on_resume() {
 fn executor_iter_resource_limit_before_function_call() {
     // Test that resource limits are enforced before first function call
     let code = "x = []\nfor i in range(10):\n    x.append(str(i))\nfoo(len(x))\n42";
-    let exec = ExecutorIter::new(code, "test.py", &[], vec!["foo".to_owned()]).unwrap();
+    let run = RunSnapshot::new(code.to_owned(), "test.py", &[], vec!["foo".to_owned()]).unwrap();
 
     // Should fail before reaching the function call
     let limits = ResourceLimits::new().max_allocations(3);
-    let result = exec.run_with_limits(vec![], limits, &mut StdPrint);
+    let result = run.run_with_limits(vec![], limits, &mut StdPrint);
 
     assert!(result.is_err(), "should exceed allocation limit before function call");
     let exc = result.unwrap_err();
@@ -233,8 +233,8 @@ fn executor_iter_resource_limit_before_function_call() {
 fn executor_iter_resource_limit_multiple_function_calls() {
     // Test resource limits across multiple function calls
     let code = "foo(1)\nbar(2)\nbaz(3)\n4";
-    let exec = ExecutorIter::new(
-        code,
+    let run = RunSnapshot::new(
+        code.to_owned(),
         "test.py",
         &[],
         vec!["foo".to_owned(), "bar".to_owned(), "baz".to_owned()],
@@ -244,7 +244,7 @@ fn executor_iter_resource_limit_multiple_function_calls() {
     // Very tight allocation limit - should still work for simple function calls
     let limits = ResourceLimits::new().max_allocations(100);
 
-    let (name, args, _kwargs, state) = exec
+    let (name, args, _kwargs, state) = run
         .run_with_limits(vec![], limits, &mut StdPrint)
         .unwrap()
         .into_function_call()
@@ -296,7 +296,7 @@ def recurse(n):
     return 0
 recurse(1000)
 ";
-    let ex = Executor::new(code, "test.py", &[]).unwrap();
+    let ex = Executor::new(code.to_owned(), "test.py", &[]).unwrap();
 
     // Very tight memory limit - should fail due to namespace memory
     // Each frame needs at least namespace_size * size_of::<Value>() bytes
@@ -328,7 +328,7 @@ def recurse(n):
     return 0
 recurse(100)
 ";
-    let ex = Executor::new(code, "test.py", &[]).unwrap();
+    let ex = Executor::new(code.to_owned(), "test.py", &[]).unwrap();
 
     // Set recursion limit to 10
     let limits = ResourceLimits::new().max_recursion_depth(Some(10));
@@ -354,7 +354,7 @@ def recurse(n):
     return 0
 recurse(5)
 ";
-    let ex = Executor::new(code, "test.py", &[]).unwrap();
+    let ex = Executor::new(code.to_owned(), "test.py", &[]).unwrap();
 
     // Set recursion limit to 10 - should succeed with 5 levels
     let limits = ResourceLimits::new().max_recursion_depth(Some(10));

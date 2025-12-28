@@ -8,10 +8,10 @@ use crate::{
     intern::Interns,
     io::PrintWriter,
     namespace::{NamespaceId, Namespaces},
-    position::{FrameExit, NoPositionTracker},
     resource::ResourceTracker,
     run_frame::{RunFrame, RunResult},
     signature::Signature,
+    snapshot::{FrameExit, NoSnapshotTracker},
     value::Value,
 };
 
@@ -128,7 +128,7 @@ impl Function {
     /// * `args` - The arguments to pass to the function
     /// * `defaults` - Evaluated default values for optional parameters
     /// * `interns` - String storage for looking up interned names in error messages
-    /// * `writer` - The writer for print output
+    /// * `print` - The print for print output
     pub fn call(
         &self,
         namespaces: &mut Namespaces,
@@ -136,7 +136,7 @@ impl Function {
         args: ArgValues,
         defaults: &[Value],
         interns: &Interns,
-        writer: &mut impl PrintWriter,
+        print: &mut impl PrintWriter,
     ) -> RunResult<Value> {
         // 1. Bind arguments to parameters
         let mut namespace = self
@@ -163,8 +163,8 @@ impl Function {
             .map_err(|e| RunError::UncatchableExc(e.into_exception(None)))?;
 
         // Execute the function body in a new frame
-        let mut p = NoPositionTracker;
-        let mut frame = RunFrame::function_frame(local_idx, self.name.name_id, interns, &mut p, writer);
+        let mut p = NoSnapshotTracker;
+        let mut frame = RunFrame::function_frame(local_idx, self.name.name_id, interns, &mut p, print);
 
         let result = frame.execute(namespaces, heap, &self.body);
 
@@ -183,7 +183,7 @@ impl Function {
     /// * `captured_cells` - Cell HeapIds captured from the enclosing scope
     /// * `defaults` - Evaluated default values for optional parameters
     /// * `interns` - String storage for looking up interned names in error messages
-    /// * `writer` - The writer for print output
+    /// * `print` - The print for print output
     ///
     /// This method is called when invoking a `Value::Closure`. The captured_cells
     /// are pushed sequentially after cell_vars in the namespace.
@@ -196,7 +196,7 @@ impl Function {
         captured_cells: &[HeapId],
         defaults: &[Value],
         interns: &Interns,
-        writer: &mut impl PrintWriter,
+        print: &mut impl PrintWriter,
     ) -> RunResult<Value> {
         // 1. Bind arguments to parameters
         let mut namespace = self
@@ -226,8 +226,8 @@ impl Function {
         let local_idx = namespaces.push_with_heap(namespace, heap)?;
 
         // Execute the function body in a new frame
-        let mut p = NoPositionTracker;
-        let mut frame = RunFrame::function_frame(local_idx, self.name.name_id, interns, &mut p, writer);
+        let mut p = NoSnapshotTracker;
+        let mut frame = RunFrame::function_frame(local_idx, self.name.name_id, interns, &mut p, print);
 
         let result = frame.execute(namespaces, heap, &self.body);
 

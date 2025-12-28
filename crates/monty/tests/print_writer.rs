@@ -2,7 +2,7 @@ use monty::{CollectStringPrint, Executor, NoPrint};
 
 #[test]
 fn print_single_string() {
-    let ex = Executor::new("print('hello')", "test.py", &[]).unwrap();
+    let ex = Executor::new("print('hello')".to_owned(), "test.py", &[]).unwrap();
     let mut writer = CollectStringPrint::new();
     ex.run_with_writer(vec![], &mut writer).unwrap();
     assert_eq!(writer.output(), "hello\n");
@@ -10,7 +10,7 @@ fn print_single_string() {
 
 #[test]
 fn print_multiple_args() {
-    let ex = Executor::new("print('hello', 'world')", "test.py", &[]).unwrap();
+    let ex = Executor::new("print('hello', 'world')".to_owned(), "test.py", &[]).unwrap();
     let mut writer = CollectStringPrint::new();
     ex.run_with_writer(vec![], &mut writer).unwrap();
     assert_eq!(writer.output(), "hello world\n");
@@ -18,7 +18,7 @@ fn print_multiple_args() {
 
 #[test]
 fn print_multiple_statements() {
-    let ex = Executor::new("print('one')\nprint('two')\nprint('three')", "test.py", &[]).unwrap();
+    let ex = Executor::new("print('one')\nprint('two')\nprint('three')".to_owned(), "test.py", &[]).unwrap();
     let mut writer = CollectStringPrint::new();
     ex.run_with_writer(vec![], &mut writer).unwrap();
     assert_eq!(writer.output(), "one\ntwo\nthree\n");
@@ -26,7 +26,7 @@ fn print_multiple_statements() {
 
 #[test]
 fn print_empty() {
-    let ex = Executor::new("print()", "test.py", &[]).unwrap();
+    let ex = Executor::new("print()".to_owned(), "test.py", &[]).unwrap();
     let mut writer = CollectStringPrint::new();
     ex.run_with_writer(vec![], &mut writer).unwrap();
     assert_eq!(writer.output(), "\n");
@@ -34,7 +34,7 @@ fn print_empty() {
 
 #[test]
 fn print_integers() {
-    let ex = Executor::new("print(1, 2, 3)", "test.py", &[]).unwrap();
+    let ex = Executor::new("print(1, 2, 3)".to_owned(), "test.py", &[]).unwrap();
     let mut writer = CollectStringPrint::new();
     ex.run_with_writer(vec![], &mut writer).unwrap();
     assert_eq!(writer.output(), "1 2 3\n");
@@ -42,7 +42,7 @@ fn print_integers() {
 
 #[test]
 fn print_mixed_types() {
-    let ex = Executor::new("print('count:', 42, True)", "test.py", &[]).unwrap();
+    let ex = Executor::new("print('count:', 42, True)".to_owned(), "test.py", &[]).unwrap();
     let mut writer = CollectStringPrint::new();
     ex.run_with_writer(vec![], &mut writer).unwrap();
     assert_eq!(writer.output(), "count: 42 True\n");
@@ -57,7 +57,7 @@ def greet(name):
 greet('Alice')
 greet('Bob')
 ";
-    let ex = Executor::new(code, "test.py", &[]).unwrap();
+    let ex = Executor::new(code.to_owned(), "test.py", &[]).unwrap();
     let mut writer = CollectStringPrint::new();
     ex.run_with_writer(vec![], &mut writer).unwrap();
     assert_eq!(writer.output(), "Hello Alice\nHello Bob\n");
@@ -69,7 +69,7 @@ fn print_in_loop() {
 for i in range(3):
     print(i)
 ";
-    let ex = Executor::new(code, "test.py", &[]).unwrap();
+    let ex = Executor::new(code.to_owned(), "test.py", &[]).unwrap();
     let mut writer = CollectStringPrint::new();
     ex.run_with_writer(vec![], &mut writer).unwrap();
     assert_eq!(writer.output(), "0\n1\n2\n");
@@ -77,7 +77,7 @@ for i in range(3):
 
 #[test]
 fn into_output_consumes_writer() {
-    let ex = Executor::new("print('test')", "test.py", &[]).unwrap();
+    let ex = Executor::new("print('test')".to_owned(), "test.py", &[]).unwrap();
     let mut writer = CollectStringPrint::new();
     ex.run_with_writer(vec![], &mut writer).unwrap();
     let output: String = writer.into_output();
@@ -88,10 +88,10 @@ fn into_output_consumes_writer() {
 fn writer_reuse_accumulates() {
     let mut writer = CollectStringPrint::new();
 
-    let ex1 = Executor::new("print('first')", "test.py", &[]).unwrap();
+    let ex1 = Executor::new("print('first')".to_owned(), "test.py", &[]).unwrap();
     ex1.run_with_writer(vec![], &mut writer).unwrap();
 
-    let ex2 = Executor::new("print('second')", "test.py", &[]).unwrap();
+    let ex2 = Executor::new("print('second')".to_owned(), "test.py", &[]).unwrap();
     ex2.run_with_writer(vec![], &mut writer).unwrap();
 
     assert_eq!(writer.output(), "first\nsecond\n");
@@ -103,7 +103,7 @@ fn no_print_suppresses_output() {
 for i in range(100):
     print('this should be suppressed', i)
 ";
-    let ex = Executor::new(code, "test.py", &[]).unwrap();
+    let ex = Executor::new(code.to_owned(), "test.py", &[]).unwrap();
     let mut writer = NoPrint;
     // Should complete without error, output is silently discarded
     let result = ex.run_with_writer(vec![], &mut writer);
@@ -114,7 +114,7 @@ for i in range(100):
 
 #[test]
 fn print_custom_sep() {
-    let ex = Executor::new("print('a', 'b', 'c', sep='-')", "test.py", &[]).unwrap();
+    let ex = Executor::new("print('a', 'b', 'c', sep='-')".to_owned(), "test.py", &[]).unwrap();
     let mut writer = CollectStringPrint::new();
     ex.run_with_writer(vec![], &mut writer).unwrap();
     assert_eq!(writer.output(), "a-b-c\n");
@@ -122,7 +122,7 @@ fn print_custom_sep() {
 
 #[test]
 fn print_custom_end() {
-    let ex = Executor::new("print('hello', end='!')", "test.py", &[]).unwrap();
+    let ex = Executor::new("print('hello', end='!')".to_owned(), "test.py", &[]).unwrap();
     let mut writer = CollectStringPrint::new();
     ex.run_with_writer(vec![], &mut writer).unwrap();
     assert_eq!(writer.output(), "hello!");
@@ -130,7 +130,12 @@ fn print_custom_end() {
 
 #[test]
 fn print_custom_sep_and_end() {
-    let ex = Executor::new("print('x', 'y', 'z', sep=', ', end='\\n---\\n')", "test.py", &[]).unwrap();
+    let ex = Executor::new(
+        "print('x', 'y', 'z', sep=', ', end='\\n---\\n')".to_owned(),
+        "test.py",
+        &[],
+    )
+    .unwrap();
     let mut writer = CollectStringPrint::new();
     ex.run_with_writer(vec![], &mut writer).unwrap();
     assert_eq!(writer.output(), "x, y, z\n---\n");
@@ -138,7 +143,7 @@ fn print_custom_sep_and_end() {
 
 #[test]
 fn print_empty_sep() {
-    let ex = Executor::new("print('a', 'b', 'c', sep='')", "test.py", &[]).unwrap();
+    let ex = Executor::new("print('a', 'b', 'c', sep='')".to_owned(), "test.py", &[]).unwrap();
     let mut writer = CollectStringPrint::new();
     ex.run_with_writer(vec![], &mut writer).unwrap();
     assert_eq!(writer.output(), "abc\n");
@@ -147,7 +152,7 @@ fn print_empty_sep() {
 #[test]
 fn print_empty_end() {
     let code = "print('first', end='')\nprint('second')";
-    let ex = Executor::new(code, "test.py", &[]).unwrap();
+    let ex = Executor::new(code.to_owned(), "test.py", &[]).unwrap();
     let mut writer = CollectStringPrint::new();
     ex.run_with_writer(vec![], &mut writer).unwrap();
     assert_eq!(writer.output(), "firstsecond\n");
@@ -156,7 +161,7 @@ fn print_empty_end() {
 #[test]
 fn print_sep_none() {
     // sep=None should use default space
-    let ex = Executor::new("print('a', 'b', sep=None)", "test.py", &[]).unwrap();
+    let ex = Executor::new("print('a', 'b', sep=None)".to_owned(), "test.py", &[]).unwrap();
     let mut writer = CollectStringPrint::new();
     ex.run_with_writer(vec![], &mut writer).unwrap();
     // In Python, sep=None means use default, but we treat it as empty string for simplicity
@@ -167,7 +172,7 @@ fn print_sep_none() {
 #[test]
 fn print_end_none() {
     // end=None should use empty string (our interpretation)
-    let ex = Executor::new("print('hello', end=None)", "test.py", &[]).unwrap();
+    let ex = Executor::new("print('hello', end=None)".to_owned(), "test.py", &[]).unwrap();
     let mut writer = CollectStringPrint::new();
     ex.run_with_writer(vec![], &mut writer).unwrap();
     assert_eq!(writer.output(), "hello\n");
@@ -176,7 +181,7 @@ fn print_end_none() {
 #[test]
 fn print_flush_ignored() {
     // flush=True should be accepted but ignored
-    let ex = Executor::new("print('test', flush=True)", "test.py", &[]).unwrap();
+    let ex = Executor::new("print('test', flush=True)".to_owned(), "test.py", &[]).unwrap();
     let mut writer = CollectStringPrint::new();
     ex.run_with_writer(vec![], &mut writer).unwrap();
     assert_eq!(writer.output(), "test\n");
@@ -185,7 +190,7 @@ fn print_flush_ignored() {
 #[test]
 fn print_kwargs_dict() {
     // Use a dict literal instead of dict() since dict builtin is not implemented
-    let ex = Executor::new("print('a', 'b', **{'sep': '-'})", "test.py", &[]).unwrap();
+    let ex = Executor::new("print('a', 'b', **{'sep': '-'})".to_owned(), "test.py", &[]).unwrap();
     let mut writer = CollectStringPrint::new();
     ex.run_with_writer(vec![], &mut writer).unwrap();
     assert_eq!(writer.output(), "a-b\n");
@@ -193,7 +198,7 @@ fn print_kwargs_dict() {
 
 #[test]
 fn print_only_kwargs_no_args() {
-    let ex = Executor::new("print(sep='-', end='!')", "test.py", &[]).unwrap();
+    let ex = Executor::new("print(sep='-', end='!')".to_owned(), "test.py", &[]).unwrap();
     let mut writer = CollectStringPrint::new();
     ex.run_with_writer(vec![], &mut writer).unwrap();
     assert_eq!(writer.output(), "!");
@@ -201,7 +206,7 @@ fn print_only_kwargs_no_args() {
 
 #[test]
 fn print_multiline_sep() {
-    let ex = Executor::new("print(1, 2, 3, sep='\\n')", "test.py", &[]).unwrap();
+    let ex = Executor::new("print(1, 2, 3, sep='\\n')".to_owned(), "test.py", &[]).unwrap();
     let mut writer = CollectStringPrint::new();
     ex.run_with_writer(vec![], &mut writer).unwrap();
     assert_eq!(writer.output(), "1\n2\n3\n");

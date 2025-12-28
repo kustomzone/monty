@@ -8,7 +8,7 @@ use std::ffi::CString;
 
 /// Benchmarks adding two numbers using Monty interpreter
 fn add_two_monty(bench: &mut Bencher) {
-    let ex = Executor::new("1 + 2", "test.py", &[]).unwrap();
+    let ex = Executor::new("1 + 2".to_owned(), "test.py", &[]).unwrap();
 
     let r = ex.run_no_limits(vec![]).unwrap();
     let int_value: i64 = r.as_ref().try_into().unwrap();
@@ -55,7 +55,8 @@ fn dict_set_get_monty(bench: &mut Bencher) {
 a = {}
 a['key'] = 'value'
 a['key']
-        ",
+        "
+        .to_owned(),
         "test.py",
         &[],
     )
@@ -107,7 +108,8 @@ fn list_append_monty(bench: &mut Bencher) {
 a = []
 a.append(42)
 a[0]
-        ",
+        "
+        .to_owned(),
         "test.py",
         &[],
     )
@@ -165,7 +167,7 @@ len(v)
 
 /// Benchmarks a loop with modulo operations using Monty interpreter
 fn loop_mod_13_monty(bench: &mut Bencher) {
-    let ex = Executor::new(LOOP_MOD_13_CODE, "test.py", &[]).unwrap();
+    let ex = Executor::new(LOOP_MOD_13_CODE.to_owned(), "test.py", &[]).unwrap();
     let r = ex.run_no_limits(vec![]).unwrap();
     let int_value: i64 = r.as_ref().try_into().unwrap();
     assert_eq!(int_value, 77);
@@ -213,7 +215,7 @@ fn loop_mod_13_cpython(bench: &mut Bencher) {
 /// Benchmarks end-to-end execution (parsing + running) using Monty
 fn end_to_end_monty(bench: &mut Bencher) {
     bench.iter(|| {
-        let ex = Executor::new(black_box("1 + 2"), "test.py", &[]).unwrap();
+        let ex = Executor::new(black_box("1 + 2").to_owned(), "test.py", &[]).unwrap();
         let r = ex.run_no_limits(vec![]).unwrap();
         let int_value: i64 = r.as_ref().try_into().unwrap();
         black_box(int_value);
@@ -244,7 +246,7 @@ const KITCHEN_SINK_CODE: &str = include_str!("../test_cases/bench__kitchen_sink.
 
 /// Benchmarks comprehensive feature coverage using Monty interpreter
 fn kitchen_sink_monty(bench: &mut Bencher) {
-    let ex = Executor::new(KITCHEN_SINK_CODE, "test.py", &[]).unwrap();
+    let ex = Executor::new(KITCHEN_SINK_CODE.to_owned(), "test.py", &[]).unwrap();
     let r = ex.run_no_limits(vec![]).unwrap();
     let int_value: i64 = r.as_ref().try_into().unwrap();
     assert_eq!(int_value, 58);
@@ -316,7 +318,7 @@ add(a=1)
 
 /// Benchmarks function call with keyword arguments using Monty interpreter
 fn func_call_kwargs_monty(bench: &mut Bencher) {
-    let ex = Executor::new(FUNC_CALL_KWARGS_CODE, "test.py", &[]).unwrap();
+    let ex = Executor::new(FUNC_CALL_KWARGS_CODE.to_owned(), "test.py", &[]).unwrap();
     let r = ex.run_no_limits(vec![]).unwrap();
     let int_value: i64 = r.as_ref().try_into().unwrap();
     assert_eq!(int_value, 3);

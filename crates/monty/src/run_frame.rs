@@ -9,8 +9,8 @@ use crate::io::PrintWriter;
 use crate::namespace::{NamespaceId, Namespaces, GLOBAL_NS_IDX};
 use crate::operators::Operator;
 use crate::parse::CodeRange;
-use crate::position::{AbstractPositionTracker, ClauseState, FrameExit};
 use crate::resource::ResourceTracker;
+use crate::snapshot::{AbstractSnapshotTracker, ClauseState, FrameExit};
 use crate::types::PyTrait;
 use crate::value::Value;
 
@@ -33,7 +33,7 @@ pub type RunResult<T> = Result<T, RunError>;
 /// When accessing a variable with `NameScope::Cell`, we look up the namespace
 /// slot to get the `Value::Ref(cell_id)`, then read/write through that cell.
 #[derive(Debug)]
-pub struct RunFrame<'i, P: AbstractPositionTracker, W: PrintWriter> {
+pub struct RunFrame<'i, P: AbstractSnapshotTracker, W: PrintWriter> {
     /// Index of this frame's local namespace in Namespaces.
     local_idx: NamespaceId,
     /// The name of the current frame (function name or "<module>").
@@ -42,9 +42,9 @@ pub struct RunFrame<'i, P: AbstractPositionTracker, W: PrintWriter> {
     /// reference to interns
     interns: &'i Interns,
     /// reference to position tracker
-    position_tracker: &'i mut P,
+    snapshot_tracker: &'i mut P,
     /// Writer for print output
-    writer: &'i mut W,
+    print: &'i mut W,
 }
 
 /// Extracts a value from `EvalResult`, returning early with `FrameExit::ExternalCall` if
@@ -61,17 +61,17 @@ macro_rules! frame_ext_call {
     };
 }
 
-impl<'i, P: AbstractPositionTracker, W: PrintWriter> RunFrame<'i, P, W> {
+impl<'i, P: AbstractSnapshotTracker, W: PrintWriter> RunFrame<'i, P, W> {
     /// Creates a new frame for module-level execution.
     ///
     /// At module level, `local_idx` is `GLOBAL_NS_IDX` (0).
-    pub fn module_frame(interns: &'i Interns, position_tracker: &'i mut P, writer: &'i mut W) -> Self {
+    pub fn module_frame(interns: &'i Interns, snapshot_tracker: &'i mut P, print: &'i mut W) -> Self {
         Self {
             local_idx: GLOBAL_NS_IDX,
             name: MODULE_STRING_ID,
             interns,
-            position_tracker,
-            writer,
+            snapshot_tracker,
+            print,
         }
     }
 
@@ -86,21 +86,21 @@ impl<'i, P: AbstractPositionTracker, W: PrintWriter> RunFrame<'i, P, W> {
     /// # Arguments
     /// * `local_idx` - Index of the function's local namespace in Namespaces
     /// * `name` - The function name StringId (for error messages)
-    /// * `position_tracker` - Tracker for the current position in the code
-    /// * `writer` - Writer for print output
+    /// * `snapshot_tracker` - Tracker for the current position in the code
+    /// * `print` - Writer for print output
     pub fn function_frame(
         local_idx: NamespaceId,
         name: StringId,
         interns: &'i Interns,
-        position_tracker: &'i mut P,
-        writer: &'i mut W,
+        snapshot_tracker: &'i mut P,
+        print: &'i mut W,
     ) -> Self {
         Self {
             local_idx,
             name,
             interns,
-            position_tracker,
-            writer,
+            snapshot_tracker,
+            print,
         }
     }
 
@@ -119,7 +119,7 @@ impl<'i, P: AbstractPositionTracker, W: PrintWriter> RunFrame<'i, P, W> {
         nodes: &[Node],
     ) -> RunResult<Option<FrameExit>> {
         // The first position must be an Index - it tells us where to start in this block
-        let position = self.position_tracker.next();
+        let position = self.snapshot_tracker.next();
         let start_index = position.index;
         let mut clause_state = position.clause_state;
 
@@ -130,7 +130,7 @@ impl<'i, P: AbstractPositionTracker, W: PrintWriter> RunFrame<'i, P, W> {
             if let Some(exit) = exit_frame {
                 // Set the index of the node to execute on resume
                 // we will have called set_skip() already if we need to skip the current node
-                self.position_tracker.record(i);
+                self.snapshot_tracker.record(i);
                 return Ok(Some(exit));
             }
             clause_state = None;
@@ -174,7 +174,7 @@ impl<'i, P: AbstractPositionTracker, W: PrintWriter> RunFrame<'i, P, W> {
 
         match node {
             Node::Expr(expr) => {
-                match EvaluateExpr::new(namespaces, self.local_idx, heap, self.interns, self.writer)
+                match EvaluateExpr::new(namespaces, self.local_idx, heap, self.interns, self.print)
                     .evaluate_discard(expr)
                 {
                     Ok(EvalResult::Value(())) => {}
@@ -255,7 +255,7 @@ impl<'i, P: AbstractPositionTracker, W: PrintWriter> RunFrame<'i, P, W> {
         heap: &mut Heap<impl ResourceTracker>,
         expr: &ExprLoc,
     ) -> RunResult<EvalResult<Value>> {
-        match EvaluateExpr::new(namespaces, self.local_idx, heap, self.interns, self.writer).evaluate_use(expr) {
+        match EvaluateExpr::new(namespaces, self.local_idx, heap, self.interns, self.print).evaluate_use(expr) {
             Ok(value) => Ok(value),
             Err(mut e) => {
                 add_frame_info(self.name, expr.position, &mut e);
@@ -270,7 +270,7 @@ impl<'i, P: AbstractPositionTracker, W: PrintWriter> RunFrame<'i, P, W> {
         heap: &mut Heap<impl ResourceTracker>,
         expr: &ExprLoc,
     ) -> RunResult<EvalResult<bool>> {
-        match EvaluateExpr::new(namespaces, self.local_idx, heap, self.interns, self.writer).evaluate_bool(expr) {
+        match EvaluateExpr::new(namespaces, self.local_idx, heap, self.interns, self.print).evaluate_bool(expr) {
             Ok(value) => Ok(value),
             Err(mut e) => {
                 add_frame_info(self.name, expr.position, &mut e);
@@ -303,7 +303,7 @@ impl<'i, P: AbstractPositionTracker, W: PrintWriter> RunFrame<'i, P, W> {
                 Value::Builtin(builtin) => {
                     // Callable is inline - call it to get the exception
                     let builtin = *builtin;
-                    let result = builtin.call(heap, ArgValues::Empty, self.interns, self.writer)?;
+                    let result = builtin.call(heap, ArgValues::Empty, self.interns, self.print)?;
                     if matches!(&result, Value::Exc(_)) {
                         // No need to drop value - Callable is Copy and doesn't need cleanup
                         let exc = result.into_exc();
@@ -625,7 +625,7 @@ impl<'i, P: AbstractPositionTracker, W: PrintWriter> RunFrame<'i, P, W> {
                     // Save current index for resumption (index taken before for_next)
                     // On resume, we'll re-execute this iteration's body with position tracking
                     // handling the internal resumption point within the body
-                    self.position_tracker.set_clause_state(ClauseState::For(iter_index));
+                    self.snapshot_tracker.set_clause_state(ClauseState::For(iter_index));
                     iter_value.drop_with_heap(heap);
                     return Ok(Some(exit));
                 }
@@ -655,11 +655,11 @@ impl<'i, P: AbstractPositionTracker, W: PrintWriter> RunFrame<'i, P, W> {
     ) -> RunResult<Option<FrameExit>> {
         if frame_ext_call!(self.execute_expr_bool(namespaces, heap, test)?) {
             if let Some(frame_exit) = self.execute(namespaces, heap, body)? {
-                self.position_tracker.set_clause_state(ClauseState::If(true));
+                self.snapshot_tracker.set_clause_state(ClauseState::If(true));
                 return Ok(Some(frame_exit));
             }
         } else if let Some(frame_exit) = self.execute(namespaces, heap, or_else)? {
-            self.position_tracker.set_clause_state(ClauseState::If(false));
+            self.snapshot_tracker.set_clause_state(ClauseState::If(false));
             return Ok(Some(frame_exit));
         }
         Ok(None)

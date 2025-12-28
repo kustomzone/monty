@@ -4,7 +4,7 @@ use std::fs;
 use std::path::Path;
 
 use ahash::AHashMap;
-use monty::{ExecProgress, Executor, ExecutorIter, PyObject, PythonException, ResourceLimits, StdPrint};
+use monty::{Executor, PyObject, PythonException, ResourceLimits, RunProgress, RunSnapshot, StdPrint};
 
 use pyo3::prelude::*;
 use pyo3::types::PyDict;
@@ -308,7 +308,7 @@ fn try_run_test(path: &Path, code: &str, expectation: &Expectation) -> Result<()
     // Handle ref-counting tests separately since they need run_ref_counts()
     #[cfg(feature = "ref-counting")]
     if let Expectation::RefCounts(expected) = expectation {
-        match Executor::new(code, &test_name, &[]) {
+        match Executor::new(code.to_owned(), &test_name, &[]) {
             Ok(ex) => {
                 let result = ex.run_ref_counts(vec![]);
                 match result {
@@ -358,7 +358,7 @@ fn try_run_test(path: &Path, code: &str, expectation: &Expectation) -> Result<()
         }
     }
 
-    match Executor::new(code, &test_name, &[]) {
+    match Executor::new(code.to_owned(), &test_name, &[]) {
         Ok(ex) => {
             let limits = ResourceLimits::new().max_recursion_depth(Some(TEST_RECURSION_LIMIT));
             let result = ex.run_with_limits(vec![], limits);
@@ -501,7 +501,7 @@ fn try_run_iter_test(path: &Path, code: &str, expectation: &Expectation) -> Resu
 
     let ext_functions: Vec<String> = ITER_EXT_FUNCTIONS.iter().copied().map(str::to_string).collect();
 
-    let exec = match ExecutorIter::new(code, &test_name, &[], ext_functions) {
+    let exec = match RunSnapshot::new(code.to_owned(), &test_name, &[], ext_functions) {
         Ok(e) => e,
         Err(parse_err) => {
             if let Expectation::Raise(expected) = expectation {
@@ -623,14 +623,14 @@ fn try_run_iter_test(path: &Path, code: &str, expectation: &Expectation) -> Resu
 }
 
 /// Execute the iter loop, dispatching external function calls until complete.
-fn run_iter_loop(exec: ExecutorIter) -> Result<PyObject, PythonException> {
+fn run_iter_loop(exec: RunSnapshot) -> Result<PyObject, PythonException> {
     let limits = ResourceLimits::new().max_recursion_depth(Some(TEST_RECURSION_LIMIT));
     let mut progress = exec.run_with_limits(vec![], limits, &mut StdPrint)?;
 
     loop {
         match progress {
-            ExecProgress::Complete(result) => return Ok(result),
-            ExecProgress::FunctionCall {
+            RunProgress::Complete(result) => return Ok(result),
+            RunProgress::FunctionCall {
                 function_name,
                 args,
                 kwargs: _,

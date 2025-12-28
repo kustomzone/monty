@@ -35,16 +35,16 @@ impl Builtins {
     /// * `heap` - The heap for allocating objects
     /// * `args` - The arguments to pass to the callable
     /// * `interns` - String storage for looking up interned names in error messages
-    /// * `writer` - The writer for print output
+    /// * `print` - The print for print output
     pub fn call(
         self,
         heap: &mut Heap<impl ResourceTracker>,
         args: ArgValues,
         interns: &Interns,
-        writer: &mut impl PrintWriter,
+        print: &mut impl PrintWriter,
     ) -> RunResult<Value> {
         match self {
-            Self::Function(b) => b.call(heap, args, interns, writer),
+            Self::Function(b) => b.call(heap, args, interns, print),
             Self::ExcType(exc) => exc.call(heap, args, interns),
             Self::Type(t) => t.call(heap, args, interns),
         }
@@ -106,16 +106,16 @@ impl BuiltinsFunctions {
     /// Executes the builtin with the provided positional arguments.
     ///
     /// The `interns` parameter provides access to interned string content for py_str and py_repr.
-    /// The `writer` parameter is used for print output.
+    /// The `print` parameter is used for print output.
     fn call(
         self,
         heap: &mut Heap<impl ResourceTracker>,
         args: ArgValues,
         interns: &Interns,
-        writer: &mut impl PrintWriter,
+        print: &mut impl PrintWriter,
     ) -> RunResult<Value> {
         match self {
-            Self::Print => builtin_print(heap, args, interns, writer),
+            Self::Print => builtin_print(heap, args, interns, print),
             Self::Len => {
                 let value = args.get_one_arg("len")?;
                 let result = match value.py_len(heap, interns) {
@@ -235,7 +235,7 @@ fn builtin_print(
     heap: &mut Heap<impl ResourceTracker>,
     args: ArgValues,
     interns: &Interns,
-    writer: &mut impl PrintWriter,
+    print: &mut impl PrintWriter,
 ) -> RunResult<Value> {
     // Split into positional args and kwargs
     let (positional, kwargs) = args.split();
@@ -254,22 +254,22 @@ fn builtin_print(
     // Print positional args with separator
     let mut iter = positional.iter();
     if let Some(value) = iter.next() {
-        writer.stdout_write(value.py_str(heap, interns));
+        print.stdout_write(value.py_str(heap, interns));
         for value in iter {
             if let Some(sep) = &sep {
-                writer.stdout_write(sep.as_str().into());
+                print.stdout_write(sep.as_str().into());
             } else {
-                writer.stdout_push(' ');
+                print.stdout_push(' ');
             }
-            writer.stdout_write(value.py_str(heap, interns));
+            print.stdout_write(value.py_str(heap, interns));
         }
     }
 
     // Append end string
     if let Some(end) = end {
-        writer.stdout_write(end.into());
+        print.stdout_write(end.into());
     } else {
-        writer.stdout_push('\n');
+        print.stdout_push('\n');
     }
 
     // Drop positional args

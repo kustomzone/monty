@@ -3,7 +3,7 @@ use std::fs;
 use std::process::ExitCode;
 use std::time::Instant;
 
-use monty::{ExecProgress, ExecutorIter, StdPrint};
+use monty::{RunProgress, RunSnapshot, StdPrint};
 
 fn main() -> ExitCode {
     let args: Vec<String> = env::args().collect();
@@ -19,7 +19,7 @@ fn main() -> ExitCode {
     let inputs = vec![];
     let ext_functions = vec![];
 
-    let ex = match ExecutorIter::new(&code, file_path, &input_names, ext_functions) {
+    let ex = match RunSnapshot::new(code, file_path, &input_names, ext_functions) {
         Ok(ex) => ex,
         Err(err) => {
             eprintln!("error:\n{err}");
@@ -29,12 +29,12 @@ fn main() -> ExitCode {
 
     let start = Instant::now();
     match ex.run_no_limits(inputs, &mut StdPrint) {
-        Ok(ExecProgress::Complete(value)) => {
+        Ok(RunProgress::Complete(value)) => {
             let elapsed = start.elapsed();
             eprintln!("success after: {elapsed:?}\n{value}");
             ExitCode::SUCCESS
         }
-        Ok(ExecProgress::FunctionCall {
+        Ok(RunProgress::FunctionCall {
             function_name, args, ..
         }) => {
             let elapsed = start.elapsed();

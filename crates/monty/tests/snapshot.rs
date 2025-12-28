@@ -1,8 +1,8 @@
-use monty::{ExecutorIter, PyObject, StdPrint};
+use monty::{PyObject, RunSnapshot, StdPrint};
 
 #[test]
 fn simple_expression_completes() {
-    let exec = ExecutorIter::new("x + 1", "test.py", &["x"], vec![]).unwrap();
+    let exec = RunSnapshot::new("x + 1".to_owned(), "test.py", &["x"], vec![]).unwrap();
     let result = exec.run_no_limits(vec![PyObject::Int(41)], &mut StdPrint).unwrap();
     assert_eq!(result.into_complete().expect("complete"), PyObject::Int(42));
 }
@@ -10,7 +10,7 @@ fn simple_expression_completes() {
 #[test]
 fn external_function_call_expression_statement() {
     // Calling an undefined function returns a FunctionCall variant
-    let exec = ExecutorIter::new("foo(1, 2)", "test.py", &[], vec!["foo".to_string()]).unwrap();
+    let exec = RunSnapshot::new("foo(1, 2)".to_owned(), "test.py", &[], vec!["foo".to_string()]).unwrap();
     let progress = exec.run_no_limits(vec![], &mut StdPrint).unwrap();
 
     let (name, args, _kwargs, state) = progress.into_function_call().expect("function call");
@@ -25,10 +25,11 @@ fn external_function_call_expression_statement() {
 #[test]
 fn external_function_call_with_assignment() {
     // Test external function call in assignment: result = foo(1, 2)
-    let exec = ExecutorIter::new(
+    let exec = RunSnapshot::new(
         "
 result = foo(1, 2)
-result + 10",
+result + 10"
+            .to_owned(),
         "test.py",
         &[],
         vec!["foo".to_owned()],
@@ -49,10 +50,11 @@ result + 10",
 #[test]
 fn external_function_call_no_args() {
     // Test external function call with no arguments
-    let exec = ExecutorIter::new(
+    let exec = RunSnapshot::new(
         "
 x = get_value()
-x",
+x"
+        .to_owned(),
         "test.py",
         &[],
         vec!["get_value".to_owned()],
@@ -78,7 +80,13 @@ fn multiple_external_function_calls() {
 a = foo(1)
 b = bar(2)
 a + b";
-    let exec = ExecutorIter::new(code, "test.py", &[], vec!["foo".to_owned(), "bar".to_owned()]).unwrap();
+    let exec = RunSnapshot::new(
+        code.to_owned(),
+        "test.py",
+        &[],
+        vec!["foo".to_owned(), "bar".to_owned()],
+    )
+    .unwrap();
 
     // First external call: foo(1)
     let (name, args, _kwargs, state) = exec
@@ -106,7 +114,7 @@ a + b";
 #[test]
 fn external_function_call_with_builtin_args() {
     // Test external function call with builtin function results as arguments
-    let exec = ExecutorIter::new("foo(len([1, 2, 3]))", "test.py", &[], vec!["foo".to_owned()]).unwrap();
+    let exec = RunSnapshot::new("foo(len([1, 2, 3]))".to_owned(), "test.py", &[], vec!["foo".to_owned()]).unwrap();
     let progress = exec.run_no_limits(vec![], &mut StdPrint).unwrap();
 
     let (name, args, _kwargs, _) = progress.into_function_call().expect("function call");
@@ -122,7 +130,7 @@ fn external_function_call_preserves_existing_variables() {
 x = 10
 y = foo(x)
 x + y";
-    let exec = ExecutorIter::new(code, "test.py", &[], vec!["foo".to_owned()]).unwrap();
+    let exec = RunSnapshot::new(code.to_owned(), "test.py", &[], vec!["foo".to_owned()]).unwrap();
 
     let (_, args, _kwargs, state) = exec
         .run_no_limits(vec![], &mut StdPrint)
@@ -142,7 +150,13 @@ x + y";
 fn external_function_nested_calls() {
     // Test nested external function calls: foo(bar(42))
     let code = "foo(bar(42))";
-    let exec = ExecutorIter::new(code, "test.py", &[], vec!["foo".to_owned(), "bar".to_owned()]).unwrap();
+    let exec = RunSnapshot::new(
+        code.to_owned(),
+        "test.py",
+        &[],
+        vec!["foo".to_owned(), "bar".to_owned()],
+    )
+    .unwrap();
 
     // First: inner call bar(42)
     let (name, args, _kwargs, state) = exec
@@ -169,7 +183,7 @@ fn external_function_nested_calls() {
 #[test]
 fn clone_executor_iter() {
     // Test that ExecutorIter can be cloned and both copies work independently
-    let exec1 = ExecutorIter::new("foo(42)", "test.py", &[], vec!["foo".to_owned()]).unwrap();
+    let exec1 = RunSnapshot::new("foo(42)".to_owned(), "test.py", &[], vec!["foo".to_owned()]).unwrap();
     let exec2 = exec1.clone();
 
     // Run first executor
@@ -205,7 +219,13 @@ if x == 1:
 else:
     result = bar(20)
 result";
-    let exec = ExecutorIter::new(code, "test.py", &[], vec!["foo".to_owned(), "bar".to_owned()]).unwrap();
+    let exec = RunSnapshot::new(
+        code.to_owned(),
+        "test.py",
+        &[],
+        vec!["foo".to_owned(), "bar".to_owned()],
+    )
+    .unwrap();
 
     // Should call foo(10), not bar
     let (name, args, _kwargs, state) = exec
@@ -230,7 +250,13 @@ if x == 1:
 else:
     result = bar(20)
 result";
-    let exec = ExecutorIter::new(code, "test.py", &[], vec!["foo".to_owned(), "bar".to_owned()]).unwrap();
+    let exec = RunSnapshot::new(
+        code.to_owned(),
+        "test.py",
+        &[],
+        vec!["foo".to_owned(), "bar".to_owned()],
+    )
+    .unwrap();
 
     // Should call bar(20), not foo
     let (name, args, _kwargs, state) = exec
@@ -253,7 +279,7 @@ total = 0
 for i in range(3):
     total = total + get_value(i)
 total";
-    let exec = ExecutorIter::new(code, "test.py", &[], vec!["get_value".to_owned()]).unwrap();
+    let exec = RunSnapshot::new(code.to_owned(), "test.py", &[], vec!["get_value".to_owned()]).unwrap();
 
     // First iteration: get_value(0)
     let (name, args, _kwargs, state) = exec
@@ -290,7 +316,7 @@ for i in range(2):
     x = compute(i)
     results.append(x)
 results";
-    let exec = ExecutorIter::new(code, "test.py", &[], vec!["compute".to_owned()]).unwrap();
+    let exec = RunSnapshot::new(code.to_owned(), "test.py", &[], vec!["compute".to_owned()]).unwrap();
 
     // First iteration: compute(0)
     let (name, args, _kwargs, state) = exec
@@ -321,7 +347,7 @@ results";
 #[test]
 fn external_function_call_with_kwargs() {
     // Test external function call with keyword arguments
-    let exec = ExecutorIter::new("foo(a=1, b=2)", "test.py", &[], vec!["foo".to_string()]).unwrap();
+    let exec = RunSnapshot::new("foo(a=1, b=2)".to_owned(), "test.py", &[], vec!["foo".to_string()]).unwrap();
     let progress = exec.run_no_limits(vec![], &mut StdPrint).unwrap();
 
     let (name, args, kwargs, state) = progress.into_function_call().expect("function call");
@@ -346,7 +372,13 @@ fn external_function_call_with_kwargs() {
 #[test]
 fn external_function_call_with_mixed_args_and_kwargs() {
     // Test external function call with both positional and keyword arguments
-    let exec = ExecutorIter::new("foo(1, 2, x=3, y=4)", "test.py", &[], vec!["foo".to_string()]).unwrap();
+    let exec = RunSnapshot::new(
+        "foo(1, 2, x=3, y=4)".to_owned(),
+        "test.py",
+        &[],
+        vec!["foo".to_string()],
+    )
+    .unwrap();
     let progress = exec.run_no_limits(vec![], &mut StdPrint).unwrap();
 
     let (name, args, kwargs, state) = progress.into_function_call().expect("function call");
@@ -373,7 +405,7 @@ fn external_function_call_kwargs_in_assignment() {
     let code = "
 result = fetch(url='http://example.com', timeout=30)
 result";
-    let exec = ExecutorIter::new(code, "test.py", &[], vec!["fetch".to_owned()]).unwrap();
+    let exec = RunSnapshot::new(code.to_owned(), "test.py", &[], vec!["fetch".to_owned()]).unwrap();
 
     let (name, args, kwargs, state) = exec
         .run_no_limits(vec![], &mut StdPrint)

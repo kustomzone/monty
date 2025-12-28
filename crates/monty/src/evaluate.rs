@@ -24,11 +24,11 @@ use crate::value::{Attr, Value};
 ///
 /// # Lifetimes
 /// * `'h` - Lifetime of the mutable borrows (namespaces and heap)
-/// * `'s` - Lifetime of the string storage and the print writer reference
+/// * `'s` - Lifetime of the string storage and the print print reference
 ///
 /// # Type Parameters
 /// * `T` - The resource tracker type for enforcing execution limits
-/// * `W` - The writer type for print output
+/// * `W` - The print type for print output
 pub struct EvaluateExpr<'h, 's, T: ResourceTracker, W: PrintWriter> {
     /// The namespace stack containing all scopes (global, local, etc.)
     pub namespaces: &'h mut Namespaces,
@@ -39,7 +39,7 @@ pub struct EvaluateExpr<'h, 's, T: ResourceTracker, W: PrintWriter> {
     /// String storage for looking up interned names
     pub interns: &'s Interns,
     /// Writer for print output
-    pub writer: &'s mut W,
+    pub print: &'s mut W,
 }
 
 /// Similar to the legacy `ok!()` macro, this gives shorthand for returning early
@@ -62,20 +62,20 @@ impl<'h, 's, T: ResourceTracker, W: PrintWriter> EvaluateExpr<'h, 's, T, W> {
     /// * `local_idx` - Index of the current local namespace
     /// * `heap` - The heap for object allocation
     /// * `interns` - String storage for looking up interned names
-    /// * `writer` - The writer for print output
+    /// * `print` - The print for print output
     pub fn new(
         namespaces: &'h mut Namespaces,
         local_idx: NamespaceId,
         heap: &'h mut Heap<T>,
         interns: &'s Interns,
-        writer: &'s mut W,
+        print: &'s mut W,
     ) -> Self {
         Self {
             namespaces,
             local_idx,
             heap,
             interns,
-            writer,
+            print,
         }
     }
 
@@ -100,7 +100,7 @@ impl<'h, 's, T: ResourceTracker, W: PrintWriter> EvaluateExpr<'h, 's, T, W> {
                     self.heap,
                     args,
                     self.interns,
-                    self.writer,
+                    self.print,
                 )
             }
             Expr::AttrCall { object, attr, args } => self.attr_call(object, attr, args),
@@ -233,7 +233,7 @@ impl<'h, 's, T: ResourceTracker, W: PrintWriter> EvaluateExpr<'h, 's, T, W> {
                     self.heap,
                     args,
                     self.interns,
-                    self.writer,
+                    self.print,
                 )?;
                 let value = return_ext_call!(eval_result);
                 value.drop_with_heap(self.heap);
