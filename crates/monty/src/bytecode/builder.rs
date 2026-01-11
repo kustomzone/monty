@@ -5,7 +5,7 @@
 
 use super::{
     code::{Code, ConstPool, ExceptionEntry, LocationEntry},
-    op::Opcode,
+    op::{self, Opcode},
 };
 use crate::{intern::StringId, parse::CodeRange, value::Value};
 
@@ -19,9 +19,9 @@ use crate::{intern::StringId, parse::CodeRange, value::Value};
 /// ```ignore
 /// let mut builder = CodeBuilder::new();
 /// builder.set_location(some_range, None);
-/// builder.emit(Opcode::LoadNone);
-/// builder.emit_u8(Opcode::LoadLocal, 0);
-/// let jump = builder.emit_jump(Opcode::JumpIfFalse);
+/// builder.emit(op::LOAD_NONE);
+/// builder.emit_u8(op::LOAD_LOCAL, 0);
+/// let jump = builder.emit_jump(op::JUMP_IF_FALSE);
 /// // ... emit more code ...
 /// builder.patch_jump(jump);
 /// let code = builder.build(num_locals);
@@ -79,20 +79,20 @@ impl CodeBuilder {
     /// Emits a no-operand instruction.
     pub fn emit(&mut self, op: Opcode) {
         self.record_location();
-        self.bytecode.push(op as u8);
+        self.bytecode.push(op.into());
     }
 
     /// Emits an instruction with a u8 operand.
     pub fn emit_u8(&mut self, op: Opcode, operand: u8) {
         self.record_location();
-        self.bytecode.push(op as u8);
+        self.bytecode.push(op.into());
         self.bytecode.push(operand);
     }
 
     /// Emits an instruction with an i8 operand.
     pub fn emit_i8(&mut self, op: Opcode, operand: i8) {
         self.record_location();
-        self.bytecode.push(op as u8);
+        self.bytecode.push(op.into());
         // Reinterpret i8 as u8 for bytecode encoding
         self.bytecode.push(operand.to_ne_bytes()[0]);
     }
@@ -100,7 +100,7 @@ impl CodeBuilder {
     /// Emits an instruction with a u16 operand (little-endian).
     pub fn emit_u16(&mut self, op: Opcode, operand: u16) {
         self.record_location();
-        self.bytecode.push(op as u8);
+        self.bytecode.push(op.into());
         self.bytecode.extend_from_slice(&operand.to_le_bytes());
     }
 
@@ -109,7 +109,7 @@ impl CodeBuilder {
     /// Used for MakeFunction: func_id (u16) + defaults_count (u8)
     pub fn emit_u16_u8(&mut self, op: Opcode, operand1: u16, operand2: u8) {
         self.record_location();
-        self.bytecode.push(op as u8);
+        self.bytecode.push(op.into());
         self.bytecode.extend_from_slice(&operand1.to_le_bytes());
         self.bytecode.push(operand2);
     }
@@ -119,7 +119,7 @@ impl CodeBuilder {
     /// Used for MakeClosure: func_id (u16) + defaults_count (u8) + cell_count (u8)
     pub fn emit_u16_u8_u8(&mut self, op: Opcode, operand1: u16, operand2: u8, operand3: u8) {
         self.record_location();
-        self.bytecode.push(op as u8);
+        self.bytecode.push(op.into());
         self.bytecode.extend_from_slice(&operand1.to_le_bytes());
         self.bytecode.push(operand2);
         self.bytecode.push(operand3);
@@ -133,7 +133,7 @@ impl CodeBuilder {
     /// name, in order matching how the values were pushed to the stack.
     pub fn emit_call_function_kw(&mut self, pos_count: u8, kwname_ids: &[u16]) {
         self.record_location();
-        self.bytecode.push(Opcode::CallFunctionKw as u8);
+        self.bytecode.push(op::CALL_FUNCTION_KW.into());
         self.bytecode.push(pos_count);
         self.bytecode
             .push(u8::try_from(kwname_ids.len()).expect("keyword count exceeds u8"));
@@ -150,7 +150,7 @@ impl CodeBuilder {
     pub fn emit_jump(&mut self, op: Opcode) -> JumpLabel {
         self.record_location();
         let label = JumpLabel(self.bytecode.len());
-        self.bytecode.push(op as u8);
+        self.bytecode.push(op.into());
         // Placeholder for i16 offset (will be patched)
         self.bytecode.extend_from_slice(&0i16.to_le_bytes());
         label
@@ -193,7 +193,7 @@ impl CodeBuilder {
         let raw_offset = target_i64 - (current_i64 + 3);
         let offset =
             i16::try_from(raw_offset).expect("jump offset exceeds i16 range (-32768..32767); function too large");
-        self.bytecode.push(op as u8);
+        self.bytecode.push(op.into());
         self.bytecode.extend_from_slice(&offset.to_le_bytes());
     }
 
@@ -229,21 +229,21 @@ impl CodeBuilder {
     /// Emits a `LoadLocal` instruction, using specialized variants for common slots.
     pub fn emit_load_local(&mut self, slot: u16) {
         match slot {
-            0 => self.emit(Opcode::LoadLocal0),
-            1 => self.emit(Opcode::LoadLocal1),
-            2 => self.emit(Opcode::LoadLocal2),
-            3 => self.emit(Opcode::LoadLocal3),
-            s if s <= 255 => self.emit_u8(Opcode::LoadLocal, u8::try_from(s).expect("slot <= 255 validated")),
-            s => self.emit_u16(Opcode::LoadLocalW, s),
+            0 => self.emit(op::LOAD_LOCAL0),
+            1 => self.emit(op::LOAD_LOCAL1),
+            2 => self.emit(op::LOAD_LOCAL2),
+            3 => self.emit(op::LOAD_LOCAL3),
+            s if s <= 255 => self.emit_u8(op::LOAD_LOCAL, u8::try_from(s).expect("slot <= 255 validated")),
+            s => self.emit_u16(op::LOAD_LOCAL_W, s),
         }
     }
 
     /// Emits `StoreLocal`, using wide variant for slots > 255.
     pub fn emit_store_local(&mut self, slot: u16) {
         if slot <= 255 {
-            self.emit_u8(Opcode::StoreLocal, u8::try_from(slot).expect("slot <= 255 validated"));
+            self.emit_u8(op::STORE_LOCAL, u8::try_from(slot).expect("slot <= 255 validated"));
         } else {
-            self.emit_u16(Opcode::StoreLocalW, slot);
+            self.emit_u16(op::STORE_LOCAL_W, slot);
         }
     }
 
@@ -319,39 +319,39 @@ mod tests {
     #[test]
     fn test_emit_basic() {
         let mut builder = CodeBuilder::new();
-        builder.emit(Opcode::LoadNone);
-        builder.emit(Opcode::Pop);
+        builder.emit(op::LOAD_NONE);
+        builder.emit(op::POP);
 
         let code = builder.build(0);
-        assert_eq!(code.bytecode(), &[Opcode::LoadNone as u8, Opcode::Pop as u8]);
+        assert_eq!(code.bytecode(), &[u8::from(op::LOAD_NONE), u8::from(op::POP)]);
     }
 
     #[test]
     fn test_emit_u8_operand() {
         let mut builder = CodeBuilder::new();
-        builder.emit_u8(Opcode::LoadLocal, 42);
+        builder.emit_u8(op::LOAD_LOCAL, 42);
 
         let code = builder.build(0);
-        assert_eq!(code.bytecode(), &[Opcode::LoadLocal as u8, 42]);
+        assert_eq!(code.bytecode(), &[u8::from(op::LOAD_LOCAL), 42]);
     }
 
     #[test]
     fn test_emit_u16_operand() {
         let mut builder = CodeBuilder::new();
-        builder.emit_u16(Opcode::LoadConst, 0x1234);
+        builder.emit_u16(op::LOAD_CONST, 0x1234);
 
         let code = builder.build(0);
-        assert_eq!(code.bytecode(), &[Opcode::LoadConst as u8, 0x34, 0x12]);
+        assert_eq!(code.bytecode(), &[op::LOAD_CONST.into(), 0x34, 0x12]);
     }
 
     #[test]
     fn test_forward_jump() {
         let mut builder = CodeBuilder::new();
-        let jump = builder.emit_jump(Opcode::Jump);
-        builder.emit(Opcode::LoadNone); // 1 byte
-        builder.emit(Opcode::Pop); // 1 byte
+        let jump = builder.emit_jump(op::JUMP);
+        builder.emit(op::LOAD_NONE); // 1 byte
+        builder.emit(op::POP); // 1 byte
         builder.patch_jump(jump);
-        builder.emit(Opcode::ReturnValue);
+        builder.emit(op::RETURN_VALUE);
 
         let code = builder.build(0);
         // Jump at offset 0, target at offset 5 (after LoadNone + Pop)
@@ -359,12 +359,12 @@ mod tests {
         assert_eq!(
             code.bytecode(),
             &[
-                Opcode::Jump as u8,
+                op::JUMP.into(),
                 2,
                 0, // i16 little-endian = 2
-                Opcode::LoadNone as u8,
-                Opcode::Pop as u8,
-                Opcode::ReturnValue as u8,
+                op::LOAD_NONE.into(),
+                op::POP.into(),
+                op::RETURN_VALUE.into(),
             ]
         );
     }
@@ -373,9 +373,9 @@ mod tests {
     fn test_backward_jump() {
         let mut builder = CodeBuilder::new();
         let loop_start = builder.current_offset();
-        builder.emit(Opcode::LoadNone); // offset 0, 1 byte
-        builder.emit(Opcode::Pop); // offset 1, 1 byte
-        builder.emit_jump_to(Opcode::Jump, loop_start); // offset 2, target 0
+        builder.emit(op::LOAD_NONE); // offset 0, 1 byte
+        builder.emit(op::POP); // offset 1, 1 byte
+        builder.emit_jump_to(op::JUMP, loop_start); // offset 2, target 0
 
         let code = builder.build(0);
         // Jump at offset 2, target at offset 0
@@ -384,9 +384,9 @@ mod tests {
         assert_eq!(
             code.bytecode(),
             &[
-                Opcode::LoadNone as u8,
-                Opcode::Pop as u8,
-                Opcode::Jump as u8,
+                op::LOAD_NONE.into(),
+                op::POP.into(),
+                op::JUMP.into(),
                 expected_offset[0],
                 expected_offset[1],
             ]
@@ -407,13 +407,13 @@ mod tests {
         assert_eq!(
             code.bytecode(),
             &[
-                Opcode::LoadLocal0 as u8,
-                Opcode::LoadLocal1 as u8,
-                Opcode::LoadLocal2 as u8,
-                Opcode::LoadLocal3 as u8,
-                Opcode::LoadLocal as u8,
+                op::LOAD_LOCAL0.into(),
+                op::LOAD_LOCAL1.into(),
+                op::LOAD_LOCAL2.into(),
+                op::LOAD_LOCAL3.into(),
+                op::LOAD_LOCAL.into(),
                 4,
-                Opcode::LoadLocalW as u8,
+                op::LOAD_LOCAL_W.into(),
                 0,
                 1, // 256 in little-endian
             ]

@@ -13,7 +13,7 @@ use std::borrow::Cow;
 use super::{
     builder::{CodeBuilder, JumpLabel},
     code::{Code, ExceptionEntry},
-    op::Opcode,
+    op::{self, Opcode},
 };
 use crate::{
     args::{ArgExprs, Kwarg},
@@ -147,8 +147,8 @@ impl<'a> Compiler<'a> {
         compiler.compile_block(nodes)?;
 
         // Module returns None if no explicit return
-        compiler.code.emit(Opcode::LoadNone);
-        compiler.code.emit(Opcode::ReturnValue);
+        compiler.code.emit(op::LOAD_NONE);
+        compiler.code.emit(op::RETURN_VALUE);
 
         Ok(CompileResult {
             code: compiler.code.build(num_locals),
@@ -178,8 +178,8 @@ impl<'a> Compiler<'a> {
         compiler.compile_block(body)?;
 
         // Implicit return None if no explicit return
-        compiler.code.emit(Opcode::LoadNone);
-        compiler.code.emit(Opcode::ReturnValue);
+        compiler.code.emit(op::LOAD_NONE);
+        compiler.code.emit(op::RETURN_VALUE);
 
         Ok((compiler.code.build(num_locals), compiler.functions))
     }
@@ -203,7 +203,7 @@ impl<'a> Compiler<'a> {
         match node {
             Node::Expr(expr) => {
                 self.compile_expr(expr)?;
-                self.code.emit(Opcode::Pop); // Discard result
+                self.code.emit(op::POP); // Discard result
             }
 
             Node::Return(expr) => {
@@ -212,7 +212,7 @@ impl<'a> Compiler<'a> {
             }
 
             Node::ReturnNone => {
-                self.code.emit(Opcode::LoadNone);
+                self.code.emit(op::LOAD_NONE);
                 self.compile_return();
             }
 
@@ -233,7 +233,7 @@ impl<'a> Compiler<'a> {
                 self.compile_expr(value)?;
                 self.compile_name(target);
                 self.compile_expr(index)?;
-                self.code.emit(Opcode::StoreSubscr);
+                self.code.emit(op::STORE_SUBSCR);
             }
 
             Node::AttrAssign {
@@ -249,7 +249,7 @@ impl<'a> Compiler<'a> {
                 // Set location to the target (e.g., `x.foo`) for proper caret in tracebacks
                 self.code.set_location(*target_position, None);
                 self.code.emit_u16(
-                    Opcode::StoreAttr,
+                    op::STORE_ATTR,
                     u16::try_from(name_id.index()).expect("name index exceeds u16"),
                 );
             }
@@ -274,9 +274,9 @@ impl<'a> Compiler<'a> {
             Node::Raise(expr) => {
                 if let Some(exc) = expr {
                     self.compile_expr(exc)?;
-                    self.code.emit(Opcode::Raise);
+                    self.code.emit(op::RAISE);
                 } else {
-                    self.code.emit(Opcode::Reraise);
+                    self.code.emit(op::RERAISE);
                 }
             }
 
@@ -354,7 +354,7 @@ impl<'a> Compiler<'a> {
         // 4. Emit MakeFunction or MakeClosure (if has free vars)
         if func_def.free_var_enclosing_slots.is_empty() {
             // MakeFunction: func_id (u16) + defaults_count (u8)
-            self.code.emit_u16_u8(Opcode::MakeFunction, func_id_u16, defaults_count);
+            self.code.emit_u16_u8(op::MAKE_FUNCTION, func_id_u16, defaults_count);
         } else {
             // Push captured cells from enclosing scope
             for &slot in &func_def.free_var_enclosing_slots {
@@ -366,7 +366,7 @@ impl<'a> Compiler<'a> {
                 u8::try_from(func_def.free_var_enclosing_slots.len()).expect("closure cell count exceeds u8");
             // MakeClosure: func_id (u16) + defaults_count (u8) + cell_count (u8)
             self.code
-                .emit_u16_u8_u8(Opcode::MakeClosure, func_id_u16, defaults_count, cell_count);
+                .emit_u16_u8_u8(op::MAKE_CLOSURE, func_id_u16, defaults_count, cell_count);
         }
 
         // 5. Store the function object to its name slot
@@ -391,7 +391,7 @@ impl<'a> Compiler<'a> {
 
             Expr::Builtin(builtin) => {
                 let idx = self.code.add_const(Value::Builtin(*builtin));
-                self.code.emit_u16(Opcode::LoadConst, idx);
+                self.code.emit_u16(op::LOAD_CONST, idx);
             }
 
             Expr::Op { left, op, right } => {
@@ -406,7 +406,7 @@ impl<'a> Compiler<'a> {
                 // ModEq needs special handling - it has a constant operand
                 if let CmpOperator::ModEq(value) = op {
                     let const_idx = self.code.add_const(Value::Int(*value));
-                    self.code.emit_u16(Opcode::CompareModEq, const_idx);
+                    self.code.emit_u16(op::COMPARE_MOD_EQ, const_idx);
                 } else {
                     self.code.emit(cmp_operator_to_opcode(op));
                 }
@@ -416,14 +416,14 @@ impl<'a> Compiler<'a> {
                 self.compile_expr(operand)?;
                 // Restore the full expression's position for traceback caret range
                 self.code.set_location(expr_loc.position, None);
-                self.code.emit(Opcode::UnaryNot);
+                self.code.emit(op::UNARY_NOT);
             }
 
             Expr::UnaryMinus(operand) => {
                 self.compile_expr(operand)?;
                 // Restore the full expression's position for traceback caret range
                 self.code.set_location(expr_loc.position, None);
-                self.code.emit(Opcode::UnaryNeg);
+                self.code.emit(op::UNARY_NEG);
             }
 
             Expr::List(elements) => {
@@ -431,7 +431,7 @@ impl<'a> Compiler<'a> {
                     self.compile_expr(elem)?;
                 }
                 self.code.emit_u16(
-                    Opcode::BuildList,
+                    op::BUILD_LIST,
                     u16::try_from(elements.len()).expect("elements count exceeds u16"),
                 );
             }
@@ -441,7 +441,7 @@ impl<'a> Compiler<'a> {
                     self.compile_expr(elem)?;
                 }
                 self.code.emit_u16(
-                    Opcode::BuildTuple,
+                    op::BUILD_TUPLE,
                     u16::try_from(elements.len()).expect("elements count exceeds u16"),
                 );
             }
@@ -452,7 +452,7 @@ impl<'a> Compiler<'a> {
                     self.compile_expr(value)?;
                 }
                 self.code.emit_u16(
-                    Opcode::BuildDict,
+                    op::BUILD_DICT,
                     u16::try_from(pairs.len()).expect("pairs count exceeds u16"),
                 );
             }
@@ -462,7 +462,7 @@ impl<'a> Compiler<'a> {
                     self.compile_expr(elem)?;
                 }
                 self.code.emit_u16(
-                    Opcode::BuildSet,
+                    op::BUILD_SET,
                     u16::try_from(elements.len()).expect("elements count exceeds u16"),
                 );
             }
@@ -472,7 +472,7 @@ impl<'a> Compiler<'a> {
                 self.compile_expr(index)?;
                 // Restore the full subscript expression's position for traceback
                 self.code.set_location(expr_loc.position, None);
-                self.code.emit(Opcode::BinarySubscr);
+                self.code.emit(op::BINARY_SUBSCR);
             }
 
             Expr::IfElse { test, body, orelse } => {
@@ -485,7 +485,7 @@ impl<'a> Compiler<'a> {
                 self.code.set_location(expr_loc.position, None);
                 let name_id = attr.string_id().expect("LoadAttr requires interned attr name");
                 self.code.emit_u16(
-                    Opcode::LoadAttr,
+                    op::LOAD_ATTR,
                     u16::try_from(name_id.index()).expect("name index exceeds u16"),
                 );
             }
@@ -505,7 +505,7 @@ impl<'a> Compiler<'a> {
             Expr::FString(parts) => {
                 // Compile each part and build the f-string
                 let part_count = self.compile_fstring_parts(parts)?;
-                self.code.emit_u16(Opcode::BuildFString, part_count);
+                self.code.emit_u16(op::BUILD_FSTRING, part_count);
             }
         }
         Ok(())
@@ -519,31 +519,31 @@ impl<'a> Compiler<'a> {
     fn compile_literal(&mut self, literal: &Literal) {
         match literal {
             Literal::None => {
-                self.code.emit(Opcode::LoadNone);
+                self.code.emit(op::LOAD_NONE);
             }
 
             Literal::Bool(true) => {
-                self.code.emit(Opcode::LoadTrue);
+                self.code.emit(op::LOAD_TRUE);
             }
 
             Literal::Bool(false) => {
-                self.code.emit(Opcode::LoadFalse);
+                self.code.emit(op::LOAD_FALSE);
             }
 
             Literal::Int(n) => {
                 // Use LoadSmallInt for values that fit in i8
                 if let Ok(small) = i8::try_from(*n) {
-                    self.code.emit_i8(Opcode::LoadSmallInt, small);
+                    self.code.emit_i8(op::LOAD_SMALL_INT, small);
                 } else {
                     let idx = self.code.add_const(Value::from(*literal));
-                    self.code.emit_u16(Opcode::LoadConst, idx);
+                    self.code.emit_u16(op::LOAD_CONST, idx);
                 }
             }
 
             // For Float, Str, Bytes, Ellipsis - use LoadConst with Value::from
             _ => {
                 let idx = self.code.add_const(Value::from(*literal));
-                self.code.emit_u16(Opcode::LoadConst, idx);
+                self.code.emit_u16(op::LOAD_CONST, idx);
             }
         }
     }
@@ -562,14 +562,14 @@ impl<'a> Compiler<'a> {
                 self.code.emit_load_local(slot);
             }
             NameScope::Global => {
-                self.code.emit_u16(Opcode::LoadGlobal, slot);
+                self.code.emit_u16(op::LOAD_GLOBAL, slot);
             }
             NameScope::Cell => {
                 // Convert namespace slot to cells array index
                 let cell_index = slot.saturating_sub(self.cell_base);
                 // Register the name for NameError messages (unbound free variable)
                 self.code.register_local_name(cell_index, ident.name_id);
-                self.code.emit_u16(Opcode::LoadCell, cell_index);
+                self.code.emit_u16(op::LOAD_CELL, cell_index);
             }
         }
     }
@@ -593,12 +593,12 @@ impl<'a> Compiler<'a> {
                 self.code.emit_store_local(slot);
             }
             NameScope::Global => {
-                self.code.emit_u16(Opcode::StoreGlobal, slot);
+                self.code.emit_u16(op::STORE_GLOBAL, slot);
             }
             NameScope::Cell => {
                 // Convert namespace slot to cells array index
                 let cell_index = slot.saturating_sub(self.cell_base);
-                self.code.emit_u16(Opcode::StoreCell, cell_index);
+                self.code.emit_u16(op::STORE_CELL, cell_index);
             }
         }
     }
@@ -622,7 +622,7 @@ impl<'a> Compiler<'a> {
             // Short-circuit AND: evaluate left, jump if falsy
             Operator::And => {
                 self.compile_expr(left)?;
-                let end_jump = self.code.emit_jump(Opcode::JumpIfFalseOrPop);
+                let end_jump = self.code.emit_jump(op::JUMP_IF_FALSE_OR_POP);
                 self.compile_expr(right)?;
                 self.code.patch_jump(end_jump);
             }
@@ -630,7 +630,7 @@ impl<'a> Compiler<'a> {
             // Short-circuit OR: evaluate left, jump if truthy
             Operator::Or => {
                 self.compile_expr(left)?;
-                let end_jump = self.code.emit_jump(Opcode::JumpIfTrueOrPop);
+                let end_jump = self.code.emit_jump(op::JUMP_IF_TRUE_OR_POP);
                 self.compile_expr(right)?;
                 self.code.patch_jump(end_jump);
             }
@@ -662,14 +662,14 @@ impl<'a> Compiler<'a> {
 
         if or_else.is_empty() {
             // Simple if without else
-            let end_jump = self.code.emit_jump(Opcode::JumpIfFalse);
+            let end_jump = self.code.emit_jump(op::JUMP_IF_FALSE);
             self.compile_block(body)?;
             self.code.patch_jump(end_jump);
         } else {
             // If with else
-            let else_jump = self.code.emit_jump(Opcode::JumpIfFalse);
+            let else_jump = self.code.emit_jump(op::JUMP_IF_FALSE);
             self.compile_block(body)?;
-            let end_jump = self.code.emit_jump(Opcode::Jump);
+            let end_jump = self.code.emit_jump(op::JUMP);
             self.code.patch_jump(else_jump);
             self.compile_block(or_else)?;
             self.code.patch_jump(end_jump);
@@ -680,9 +680,9 @@ impl<'a> Compiler<'a> {
     /// Compiles a ternary conditional expression.
     fn compile_if_else_expr(&mut self, test: &ExprLoc, body: &ExprLoc, orelse: &ExprLoc) -> Result<(), CompileError> {
         self.compile_expr(test)?;
-        let else_jump = self.code.emit_jump(Opcode::JumpIfFalse);
+        let else_jump = self.code.emit_jump(op::JUMP_IF_FALSE);
         self.compile_expr(body)?;
-        let end_jump = self.code.emit_jump(Opcode::Jump);
+        let end_jump = self.code.emit_jump(op::JUMP);
         self.code.patch_jump(else_jump);
         self.compile_expr(orelse)?;
         self.code.patch_jump(end_jump);
@@ -698,7 +698,7 @@ impl<'a> Compiler<'a> {
         match callable {
             Callable::Builtin(builtin) => {
                 let idx = self.code.add_const(Value::Builtin(*builtin));
-                self.code.emit_u16(Opcode::LoadConst, idx);
+                self.code.emit_u16(op::LOAD_CONST, idx);
             }
             Callable::Name(ident) => {
                 // Use identifier position so NameError shows caret under just the name
@@ -711,18 +711,18 @@ impl<'a> Compiler<'a> {
         match args {
             ArgExprs::Empty => {
                 self.code.set_location(call_pos, None);
-                self.code.emit_u8(Opcode::CallFunction, 0);
+                self.code.emit_u8(op::CALL_FUNCTION, 0);
             }
             ArgExprs::One(arg) => {
                 self.compile_expr(arg)?;
                 self.code.set_location(call_pos, None);
-                self.code.emit_u8(Opcode::CallFunction, 1);
+                self.code.emit_u8(op::CALL_FUNCTION, 1);
             }
             ArgExprs::Two(arg1, arg2) => {
                 self.compile_expr(arg1)?;
                 self.compile_expr(arg2)?;
                 self.code.set_location(call_pos, None);
-                self.code.emit_u8(Opcode::CallFunction, 2);
+                self.code.emit_u8(op::CALL_FUNCTION, 2);
             }
             ArgExprs::Args(args) => {
                 // Check argument count limit before compiling
@@ -737,7 +737,7 @@ impl<'a> Compiler<'a> {
                 }
                 let arg_count = u8::try_from(args.len()).expect("argument count exceeds u8");
                 self.code.set_location(call_pos, None);
-                self.code.emit_u8(Opcode::CallFunction, arg_count);
+                self.code.emit_u8(op::CALL_FUNCTION, arg_count);
             }
             ArgExprs::Kwargs(kwargs) => {
                 // Check keyword argument count limit
@@ -853,18 +853,18 @@ impl<'a> Compiler<'a> {
             }
         }
         self.code.emit_u16(
-            Opcode::BuildList,
+            op::BUILD_LIST,
             u16::try_from(pos_count).expect("positional arg count exceeds u16"),
         );
 
         // Extend with *args if present
         if let Some(var_args_expr) = var_args {
             self.compile_expr(var_args_expr)?;
-            self.code.emit(Opcode::ListExtend);
+            self.code.emit(op::LIST_EXTEND);
         }
 
         // Convert list to tuple
-        self.code.emit(Opcode::ListToTuple);
+        self.code.emit(op::LIST_TO_TUPLE);
 
         // 2. Build kwargs dict (if we have kwargs or var_kwargs)
         let has_kwargs = kwargs.is_some() || var_kwargs.is_some();
@@ -875,27 +875,27 @@ impl<'a> Compiler<'a> {
                 for kwarg in kwargs {
                     // Push key as interned string constant
                     let key_const = self.code.add_const(Value::InternString(kwarg.key.name_id));
-                    self.code.emit_u16(Opcode::LoadConst, key_const);
+                    self.code.emit_u16(op::LOAD_CONST, key_const);
                     // Push value
                     self.compile_expr(&kwarg.value)?;
                 }
             }
             self.code.emit_u16(
-                Opcode::BuildDict,
+                op::BUILD_DICT,
                 u16::try_from(kw_count).expect("keyword count exceeds u16"),
             );
 
             // Merge **kwargs if present
             if let Some(var_kwargs_expr) = var_kwargs {
                 self.compile_expr(var_kwargs_expr)?;
-                self.code.emit_u16(Opcode::DictMerge, func_name_id);
+                self.code.emit_u16(op::DICT_MERGE, func_name_id);
             }
         }
 
         // 3. Call the function
         self.code.set_location(call_pos, None);
         let flags = u8::from(has_kwargs);
-        self.code.emit_u8(Opcode::CallFunctionEx, flags);
+        self.code.emit_u8(op::CALL_FUNCTION_EX, flags);
         Ok(())
     }
 
@@ -911,7 +911,7 @@ impl<'a> Compiler<'a> {
         match args {
             ArgExprs::Empty => {
                 self.code.emit_u16_u8(
-                    Opcode::CallMethod,
+                    op::CALL_METHOD,
                     u16::try_from(name_id.index()).expect("name index exceeds u16"),
                     0,
                 );
@@ -919,7 +919,7 @@ impl<'a> Compiler<'a> {
             ArgExprs::One(arg) => {
                 self.compile_expr(arg)?;
                 self.code.emit_u16_u8(
-                    Opcode::CallMethod,
+                    op::CALL_METHOD,
                     u16::try_from(name_id.index()).expect("name index exceeds u16"),
                     1,
                 );
@@ -928,7 +928,7 @@ impl<'a> Compiler<'a> {
                 self.compile_expr(arg1)?;
                 self.compile_expr(arg2)?;
                 self.code.emit_u16_u8(
-                    Opcode::CallMethod,
+                    op::CALL_METHOD,
                     u16::try_from(name_id.index()).expect("name index exceeds u16"),
                     2,
                 );
@@ -946,7 +946,7 @@ impl<'a> Compiler<'a> {
                 }
                 let arg_count = u8::try_from(args.len()).expect("argument count exceeds u8");
                 self.code.emit_u16_u8(
-                    Opcode::CallMethod,
+                    op::CALL_METHOD,
                     u16::try_from(name_id.index()).expect("name index exceeds u16"),
                     arg_count,
                 );
@@ -970,7 +970,7 @@ impl<'a> Compiler<'a> {
         // Compile iterator expression
         self.compile_expr(iter)?;
         // Convert to iterator
-        self.code.emit(Opcode::GetIter);
+        self.code.emit(op::GET_ITER);
 
         // Loop start
         let loop_start = self.code.current_offset();
@@ -982,7 +982,7 @@ impl<'a> Compiler<'a> {
         });
 
         // ForIter: advance iterator or jump to end
-        let end_jump = self.code.emit_jump(Opcode::ForIter);
+        let end_jump = self.code.emit_jump(op::FOR_ITER);
 
         // Store current value to target
         self.compile_store(target);
@@ -991,7 +991,7 @@ impl<'a> Compiler<'a> {
         self.compile_block(body)?;
 
         // Jump back to loop start
-        self.code.emit_jump_to(Opcode::Jump, loop_start);
+        self.code.emit_jump_to(op::JUMP, loop_start);
 
         // End of loop
         self.code.patch_jump(end_jump);
@@ -1019,24 +1019,24 @@ impl<'a> Compiler<'a> {
         // Compile test
         self.compile_expr(test)?;
         // Jump over raise if truthy
-        let skip_jump = self.code.emit_jump(Opcode::JumpIfTrue);
+        let skip_jump = self.code.emit_jump(op::JUMP_IF_TRUE);
 
         // Raise AssertionError
         let exc_idx = self.code.add_const(Value::Builtin(Builtins::ExcType(
             crate::exception_private::ExcType::AssertionError,
         )));
-        self.code.emit_u16(Opcode::LoadConst, exc_idx);
+        self.code.emit_u16(op::LOAD_CONST, exc_idx);
 
         if let Some(msg_expr) = msg {
             // Call AssertionError(msg)
             self.compile_expr(msg_expr)?;
-            self.code.emit_u8(Opcode::CallFunction, 1);
+            self.code.emit_u8(op::CALL_FUNCTION, 1);
         } else {
             // Call AssertionError()
-            self.code.emit_u8(Opcode::CallFunction, 0);
+            self.code.emit_u8(op::CALL_FUNCTION, 0);
         }
 
-        self.code.emit(Opcode::Raise);
+        self.code.emit(op::RAISE);
         self.code.patch_jump(skip_jump);
         Ok(())
     }
@@ -1054,7 +1054,7 @@ impl<'a> Compiler<'a> {
                 FStringPart::Literal(string_id) => {
                     // Push the interned string as a constant
                     let const_idx = self.code.add_const(Value::InternString(*string_id));
-                    self.code.emit_u16(Opcode::LoadConst, const_idx);
+                    self.code.emit_u16(op::LOAD_CONST, const_idx);
                     count += 1;
                 }
                 FStringPart::Interpolation {
@@ -1066,7 +1066,7 @@ impl<'a> Compiler<'a> {
                     // If debug prefix present, push it first
                     if let Some(prefix_id) = debug_prefix {
                         let const_idx = self.code.add_const(Value::InternString(*prefix_id));
-                        self.code.emit_u16(Opcode::LoadConst, const_idx);
+                        self.code.emit_u16(op::LOAD_CONST, const_idx);
                         count += 1;
                     }
 
@@ -1082,7 +1082,7 @@ impl<'a> Compiler<'a> {
 
                     // Emit FormatValue with appropriate flags
                     let flags = self.compile_format_value(effective_conversion, format_spec.as_ref())?;
-                    self.code.emit_u8(Opcode::FormatValue, flags);
+                    self.code.emit_u8(op::FORMAT_VALUE, flags);
                     count += 1;
                 }
             }
@@ -1115,7 +1115,7 @@ impl<'a> Compiler<'a> {
                 // We store this as a special format spec value in the constant pool
                 // The VM will recognize this and use the pre-parsed spec
                 let const_idx = self.add_format_spec_const(parsed);
-                self.code.emit_u16(Opcode::LoadConst, const_idx);
+                self.code.emit_u16(op::LOAD_CONST, const_idx);
                 Ok(conv_bits | 0x04) // has format spec on stack
             }
             Some(FormatSpec::Dynamic(dynamic_parts)) => {
@@ -1123,7 +1123,7 @@ impl<'a> Compiler<'a> {
                 // Then parse it at runtime
                 let part_count = self.compile_fstring_parts(dynamic_parts)?;
                 if part_count > 1 {
-                    self.code.emit_u16(Opcode::BuildFString, part_count);
+                    self.code.emit_u16(op::BUILD_FSTRING, part_count);
                 }
                 // Format spec string is now on stack
                 Ok(conv_bits | 0x04) // has format spec on stack
@@ -1157,11 +1157,11 @@ impl<'a> Compiler<'a> {
         if let Some(finally_target) = self.finally_targets.last_mut() {
             // Inside a try-finally: jump to finally, then return
             // Return value is already on stack
-            let jump = self.code.emit_jump(Opcode::Jump);
+            let jump = self.code.emit_jump(op::JUMP);
             finally_target.return_jumps.push(jump);
         } else {
             // Normal return
-            self.code.emit(Opcode::ReturnValue);
+            self.code.emit(op::RETURN_VALUE);
         }
     }
 
@@ -1213,7 +1213,7 @@ impl<'a> Compiler<'a> {
         let try_end = self.code.current_offset();
 
         // Jump to else/finally if no exception (skip handlers)
-        let after_try_jump = self.code.emit_jump(Opcode::Jump);
+        let after_try_jump = self.code.emit_jump(op::JUMP);
 
         // === Handler dispatch starts here ===
         let handler_start = self.code.current_offset();
@@ -1226,7 +1226,7 @@ impl<'a> Compiler<'a> {
             self.compile_exception_handlers(&try_block.handlers, &mut finally_jumps)?;
         } else {
             // No handlers - just reraise (this only happens with try-finally)
-            self.code.emit(Opcode::Reraise);
+            self.code.emit(op::RERAISE);
         }
 
         // Mark end of handler dispatch (for finally exception entry)
@@ -1242,9 +1242,9 @@ impl<'a> Compiler<'a> {
             // But we can't easily save the exception, so we use a different approach:
             // The exception is already on the exception_stack from handle_exception,
             // so we can just pop from operand stack, run finally, then reraise.
-            self.code.emit(Opcode::Pop); // Pop exception from operand stack
+            self.code.emit(op::POP); // Pop exception from operand stack
             self.compile_block(&try_block.finally)?;
-            self.code.emit(Opcode::Reraise); // Re-raise from exception_stack
+            self.code.emit(op::RERAISE); // Re-raise from exception_stack
             Some(cleanup_start)
         } else {
             None
@@ -1368,7 +1368,7 @@ impl<'a> Compiler<'a> {
                 // Stack: [exception]
 
                 // Duplicate exception for type check
-                self.code.emit(Opcode::Dup);
+                self.code.emit(op::DUP);
                 // Stack: [exception, exception]
 
                 // Load the exception type to match against
@@ -1377,11 +1377,11 @@ impl<'a> Compiler<'a> {
 
                 // Check if exception matches the type
                 // This validates exc_type is a valid exception type and performs the match
-                self.code.emit(Opcode::CheckExcMatch);
+                self.code.emit(op::CHECK_EXC_MATCH);
                 // Stack: [exception, bool]
 
                 // Jump to next handler if match returned False
-                let no_match_jump = self.code.emit_jump(Opcode::JumpIfFalse);
+                let no_match_jump = self.code.emit_jump(op::JUMP_IF_FALSE);
 
                 if is_last {
                     // Last handler - if no match, reraise
@@ -1394,7 +1394,7 @@ impl<'a> Compiler<'a> {
                 if let Some(name) = &handler.name {
                     // Stack: [exception]
                     // Store to variable (don't pop - we still need it for current_exception)
-                    self.code.emit(Opcode::Dup);
+                    self.code.emit(op::DUP);
                     self.compile_store(name);
                 }
 
@@ -1407,18 +1407,18 @@ impl<'a> Compiler<'a> {
                 }
 
                 // Clear current_exception
-                self.code.emit(Opcode::ClearException);
+                self.code.emit(op::CLEAR_EXCEPTION);
 
                 // Pop the exception from stack
-                self.code.emit(Opcode::Pop);
+                self.code.emit(op::POP);
 
                 // Jump to finally
-                finally_jumps.push(self.code.emit_jump(Opcode::Jump));
+                finally_jumps.push(self.code.emit_jump(op::JUMP));
 
                 // If this was last handler and no match, we need to reraise
                 if is_last {
                     self.code.patch_jump(no_match_jump);
-                    self.code.emit(Opcode::Reraise);
+                    self.code.emit(op::RERAISE);
                 }
             } else {
                 // Bare except: catches everything
@@ -1426,7 +1426,7 @@ impl<'a> Compiler<'a> {
 
                 // Bind to variable if needed
                 if let Some(name) = &handler.name {
-                    self.code.emit(Opcode::Dup);
+                    self.code.emit(op::DUP);
                     self.compile_store(name);
                 }
 
@@ -1439,13 +1439,13 @@ impl<'a> Compiler<'a> {
                 }
 
                 // Clear current_exception
-                self.code.emit(Opcode::ClearException);
+                self.code.emit(op::CLEAR_EXCEPTION);
 
                 // Pop the exception from stack
-                self.code.emit(Opcode::Pop);
+                self.code.emit(op::POP);
 
                 // Jump to finally
-                finally_jumps.push(self.code.emit_jump(Opcode::Jump));
+                finally_jumps.push(self.code.emit_jump(op::JUMP));
             }
         }
 
@@ -1459,7 +1459,7 @@ impl<'a> Compiler<'a> {
             NameScope::Local => {
                 if slot <= 255 {
                     self.code
-                        .emit_u8(Opcode::DeleteLocal, u8::try_from(slot).expect("slot <= 255 validated"));
+                        .emit_u8(op::DELETE_LOCAL, u8::try_from(slot).expect("slot <= 255 validated"));
                 } else {
                     // Wide variant not implemented yet
                     todo!("DeleteLocalW for slot > 255");
@@ -1468,7 +1468,7 @@ impl<'a> Compiler<'a> {
             NameScope::Global | NameScope::Cell => {
                 // Delete global/cell not commonly needed
                 // For now, just store Undefined
-                self.code.emit(Opcode::LoadNone);
+                self.code.emit(op::LOAD_NONE);
                 self.compile_store(target);
             }
         }
@@ -1513,19 +1513,19 @@ impl CompileError {
 /// Maps a binary `Operator` to its corresponding `Opcode`.
 fn operator_to_opcode(op: &Operator) -> Opcode {
     match op {
-        Operator::Add => Opcode::BinaryAdd,
-        Operator::Sub => Opcode::BinarySub,
-        Operator::Mult => Opcode::BinaryMul,
-        Operator::Div => Opcode::BinaryDiv,
-        Operator::FloorDiv => Opcode::BinaryFloorDiv,
-        Operator::Mod => Opcode::BinaryMod,
-        Operator::Pow => Opcode::BinaryPow,
-        Operator::MatMult => Opcode::BinaryMatMul,
-        Operator::LShift => Opcode::BinaryLShift,
-        Operator::RShift => Opcode::BinaryRShift,
-        Operator::BitOr => Opcode::BinaryOr,
-        Operator::BitXor => Opcode::BinaryXor,
-        Operator::BitAnd => Opcode::BinaryAnd,
+        Operator::Add => op::BINARY_ADD,
+        Operator::Sub => op::BINARY_SUB,
+        Operator::Mult => op::BINARY_MUL,
+        Operator::Div => op::BINARY_DIV,
+        Operator::FloorDiv => op::BINARY_FLOOR_DIV,
+        Operator::Mod => op::BINARY_MOD,
+        Operator::Pow => op::BINARY_POW,
+        Operator::MatMult => op::BINARY_MAT_MUL,
+        Operator::LShift => op::BINARY_LSHIFT,
+        Operator::RShift => op::BINARY_RSHIFT,
+        Operator::BitOr => op::BINARY_OR,
+        Operator::BitXor => op::BINARY_XOR,
+        Operator::BitAnd => op::BINARY_AND,
         // And/Or are handled separately for short-circuit evaluation
         Operator::And | Operator::Or => {
             unreachable!("And/Or operators handled in compile_binary_op")
@@ -1536,18 +1536,18 @@ fn operator_to_opcode(op: &Operator) -> Opcode {
 /// Maps an `Operator` to its in-place (augmented assignment) `Opcode`.
 fn operator_to_inplace_opcode(op: &Operator) -> Opcode {
     match op {
-        Operator::Add => Opcode::InplaceAdd,
-        Operator::Sub => Opcode::InplaceSub,
-        Operator::Mult => Opcode::InplaceMul,
-        Operator::Div => Opcode::InplaceDiv,
-        Operator::FloorDiv => Opcode::InplaceFloorDiv,
-        Operator::Mod => Opcode::InplaceMod,
-        Operator::Pow => Opcode::InplacePow,
-        Operator::BitAnd => Opcode::InplaceAnd,
-        Operator::BitOr => Opcode::InplaceOr,
-        Operator::BitXor => Opcode::InplaceXor,
-        Operator::LShift => Opcode::InplaceLShift,
-        Operator::RShift => Opcode::InplaceRShift,
+        Operator::Add => op::INPLACE_ADD,
+        Operator::Sub => op::INPLACE_SUB,
+        Operator::Mult => op::INPLACE_MUL,
+        Operator::Div => op::INPLACE_DIV,
+        Operator::FloorDiv => op::INPLACE_FLOOR_DIV,
+        Operator::Mod => op::INPLACE_MOD,
+        Operator::Pow => op::INPLACE_POW,
+        Operator::BitAnd => op::INPLACE_AND,
+        Operator::BitOr => op::INPLACE_OR,
+        Operator::BitXor => op::INPLACE_XOR,
+        Operator::LShift => op::INPLACE_LSHIFT,
+        Operator::RShift => op::INPLACE_RSHIFT,
         Operator::MatMult => todo!("InplaceMatMul not yet defined"),
         Operator::And | Operator::Or => {
             unreachable!("And/Or operators cannot be used in augmented assignment")
@@ -1558,16 +1558,16 @@ fn operator_to_inplace_opcode(op: &Operator) -> Opcode {
 /// Maps a `CmpOperator` to its corresponding `Opcode`.
 fn cmp_operator_to_opcode(op: &CmpOperator) -> Opcode {
     match op {
-        CmpOperator::Eq => Opcode::CompareEq,
-        CmpOperator::NotEq => Opcode::CompareNe,
-        CmpOperator::Lt => Opcode::CompareLt,
-        CmpOperator::LtE => Opcode::CompareLe,
-        CmpOperator::Gt => Opcode::CompareGt,
-        CmpOperator::GtE => Opcode::CompareGe,
-        CmpOperator::Is => Opcode::CompareIs,
-        CmpOperator::IsNot => Opcode::CompareIsNot,
-        CmpOperator::In => Opcode::CompareIn,
-        CmpOperator::NotIn => Opcode::CompareNotIn,
+        CmpOperator::Eq => op::COMPARE_EQ,
+        CmpOperator::NotEq => op::COMPARE_NE,
+        CmpOperator::Lt => op::COMPARE_LT,
+        CmpOperator::LtE => op::COMPARE_LE,
+        CmpOperator::Gt => op::COMPARE_GT,
+        CmpOperator::GtE => op::COMPARE_GE,
+        CmpOperator::Is => op::COMPARE_IS,
+        CmpOperator::IsNot => op::COMPARE_IS_NOT,
+        CmpOperator::In => op::COMPARE_IN,
+        CmpOperator::NotIn => op::COMPARE_NOT_IN,
         // ModEq is handled specially at the call site (needs constant operand)
         CmpOperator::ModEq(_) => unreachable!("ModEq handled at call site"),
     }
@@ -1591,7 +1591,7 @@ mod tests {
         let result = Compiler::compile_module(&[], &interns, 0).unwrap();
         // Empty module should have LoadNone + ReturnValue
         assert_eq!(result.code.bytecode().len(), 2);
-        assert_eq!(result.code.bytecode()[0], Opcode::LoadNone as u8);
-        assert_eq!(result.code.bytecode()[1], Opcode::ReturnValue as u8);
+        assert_eq!(result.code.bytecode()[0], u8::from(op::LOAD_NONE));
+        assert_eq!(result.code.bytecode()[1], u8::from(op::RETURN_VALUE));
     }
 }

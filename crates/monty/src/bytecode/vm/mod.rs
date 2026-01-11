@@ -12,9 +12,12 @@ mod format;
 
 use call::CallResult;
 
+use super::{
+    code::Code,
+    op::{self, Opcode},
+};
 use crate::{
     args::{ArgValues, KwargsValues},
-    bytecode::{code::Code, op::Opcode},
     exception_private::{ExcType, RunError, RunResult, SimpleException},
     for_iterator::ForIterator,
     heap::{Heap, HeapData, HeapId},
@@ -313,11 +316,11 @@ impl<'a, T: ResourceTracker, P: PrintWriter> VM<'a, T, P> {
                 // ============================================================
                 // Stack Operations
                 // ============================================================
-                Opcode::Pop => {
+                op::POP => {
                     let value = self.pop();
                     value.drop_with_heap(self.heap);
                 }
-                Opcode::Dup => {
+                op::DUP => {
                     // Copy without incrementing refcount first (avoids borrow conflict)
                     let value = self.peek().copy_for_extend();
                     // Now we can safely increment refcount and push
@@ -326,12 +329,12 @@ impl<'a, T: ResourceTracker, P: PrintWriter> VM<'a, T, P> {
                     }
                     self.push(value);
                 }
-                Opcode::Rot2 => {
+                op::ROT2 => {
                     // Swap top two: [a, b] → [b, a]
                     let len = self.stack.len();
                     self.stack.swap(len - 1, len - 2);
                 }
-                Opcode::Rot3 => {
+                op::ROT3 => {
                     // Rotate top three: [a, b, c] → [c, a, b]
                     // Uses in-place rotation without cloning
                     let len = self.stack.len();
@@ -340,7 +343,7 @@ impl<'a, T: ResourceTracker, P: PrintWriter> VM<'a, T, P> {
                     self.stack[len - 3..].rotate_right(1);
                 }
                 // Constants & Literals
-                Opcode::LoadConst => {
+                op::LOAD_CONST => {
                     let idx = self.fetch_u16();
                     // Copy without incrementing refcount first (avoids borrow conflict)
                     let value = self.current_frame().code.constants().get(idx).copy_for_extend();
@@ -350,92 +353,92 @@ impl<'a, T: ResourceTracker, P: PrintWriter> VM<'a, T, P> {
                     }
                     self.push(value);
                 }
-                Opcode::LoadNone => self.push(Value::None),
-                Opcode::LoadTrue => self.push(Value::Bool(true)),
-                Opcode::LoadFalse => self.push(Value::Bool(false)),
-                Opcode::LoadSmallInt => {
+                op::LOAD_NONE => self.push(Value::None),
+                op::LOAD_TRUE => self.push(Value::Bool(true)),
+                op::LOAD_FALSE => self.push(Value::Bool(false)),
+                op::LOAD_SMALL_INT => {
                     let n = self.fetch_i8();
                     self.push(Value::Int(i64::from(n)));
                 }
                 // Variables - Specialized Local Loads (no operand)
-                Opcode::LoadLocal0 => try_catch!(self, self.load_local(0)),
-                Opcode::LoadLocal1 => try_catch!(self, self.load_local(1)),
-                Opcode::LoadLocal2 => try_catch!(self, self.load_local(2)),
-                Opcode::LoadLocal3 => try_catch!(self, self.load_local(3)),
+                op::LOAD_LOCAL0 => try_catch!(self, self.load_local(0)),
+                op::LOAD_LOCAL1 => try_catch!(self, self.load_local(1)),
+                op::LOAD_LOCAL2 => try_catch!(self, self.load_local(2)),
+                op::LOAD_LOCAL3 => try_catch!(self, self.load_local(3)),
                 // Variables - General Local Operations
-                Opcode::LoadLocal => {
+                op::LOAD_LOCAL => {
                     let slot = u16::from(self.fetch_u8());
                     try_catch!(self, self.load_local(slot));
                 }
-                Opcode::LoadLocalW => {
+                op::LOAD_LOCAL_W => {
                     let slot = self.fetch_u16();
                     try_catch!(self, self.load_local(slot));
                 }
-                Opcode::StoreLocal => {
+                op::STORE_LOCAL => {
                     let slot = u16::from(self.fetch_u8());
                     self.store_local(slot);
                 }
-                Opcode::StoreLocalW => {
+                op::STORE_LOCAL_W => {
                     let slot = self.fetch_u16();
                     self.store_local(slot);
                 }
-                Opcode::DeleteLocal => {
+                op::DELETE_LOCAL => {
                     let slot = u16::from(self.fetch_u8());
                     self.delete_local(slot);
                 }
                 // Variables - Global Operations
-                Opcode::LoadGlobal => {
+                op::LOAD_GLOBAL => {
                     let slot = self.fetch_u16();
                     try_catch!(self, self.load_global(slot));
                 }
-                Opcode::StoreGlobal => {
+                op::STORE_GLOBAL => {
                     let slot = self.fetch_u16();
                     self.store_global(slot);
                 }
                 // Variables - Cell Operations (closures)
-                Opcode::LoadCell => {
+                op::LOAD_CELL => {
                     let slot = self.fetch_u16();
                     try_catch!(self, self.load_cell(slot));
                 }
-                Opcode::StoreCell => {
+                op::STORE_CELL => {
                     let slot = self.fetch_u16();
                     self.store_cell(slot);
                 }
                 // Binary Operations - route through exception handling for tracebacks
-                Opcode::BinaryAdd => try_catch!(self, self.binary_add()),
-                Opcode::BinarySub => try_catch!(self, self.binary_sub()),
-                Opcode::BinaryMul => try_catch!(self, self.binary_mult()),
-                Opcode::BinaryDiv => try_catch!(self, self.binary_div()),
-                Opcode::BinaryFloorDiv => try_catch!(self, self.binary_floordiv()),
-                Opcode::BinaryMod => try_catch!(self, self.binary_mod()),
-                Opcode::BinaryPow => try_catch!(self, self.binary_pow()),
+                op::BINARY_ADD => try_catch!(self, self.binary_add()),
+                op::BINARY_SUB => try_catch!(self, self.binary_sub()),
+                op::BINARY_MUL => try_catch!(self, self.binary_mult()),
+                op::BINARY_DIV => try_catch!(self, self.binary_div()),
+                op::BINARY_FLOOR_DIV => try_catch!(self, self.binary_floordiv()),
+                op::BINARY_MOD => try_catch!(self, self.binary_mod()),
+                op::BINARY_POW => try_catch!(self, self.binary_pow()),
                 // Bitwise operations - only work on integers
-                Opcode::BinaryAnd => try_catch!(self, self.binary_bitwise(BitwiseOp::And)),
-                Opcode::BinaryOr => try_catch!(self, self.binary_bitwise(BitwiseOp::Or)),
-                Opcode::BinaryXor => try_catch!(self, self.binary_bitwise(BitwiseOp::Xor)),
-                Opcode::BinaryLShift => try_catch!(self, self.binary_bitwise(BitwiseOp::LShift)),
-                Opcode::BinaryRShift => try_catch!(self, self.binary_bitwise(BitwiseOp::RShift)),
-                Opcode::BinaryMatMul => todo!("BinaryMatMul not implemented"),
+                op::BINARY_AND => try_catch!(self, self.binary_bitwise(BitwiseOp::And)),
+                op::BINARY_OR => try_catch!(self, self.binary_bitwise(BitwiseOp::Or)),
+                op::BINARY_XOR => try_catch!(self, self.binary_bitwise(BitwiseOp::Xor)),
+                op::BINARY_LSHIFT => try_catch!(self, self.binary_bitwise(BitwiseOp::LShift)),
+                op::BINARY_RSHIFT => try_catch!(self, self.binary_bitwise(BitwiseOp::RShift)),
+                op::BINARY_MAT_MUL => todo!("BinaryMatMul not implemented"),
                 // Comparison Operations
-                Opcode::CompareEq => self.compare_eq(),
-                Opcode::CompareNe => self.compare_ne(),
-                Opcode::CompareLt => self.compare_ord(std::cmp::Ordering::is_lt),
-                Opcode::CompareLe => self.compare_ord(std::cmp::Ordering::is_le),
-                Opcode::CompareGt => self.compare_ord(std::cmp::Ordering::is_gt),
-                Opcode::CompareGe => self.compare_ord(std::cmp::Ordering::is_ge),
-                Opcode::CompareIs => self.compare_is(false),
-                Opcode::CompareIsNot => self.compare_is(true),
-                Opcode::CompareIn => try_catch!(self, self.compare_in(false)),
-                Opcode::CompareNotIn => try_catch!(self, self.compare_in(true)),
-                Opcode::CompareModEq => try_catch!(self, self.compare_mod_eq()),
+                op::COMPARE_EQ => self.compare_eq(),
+                op::COMPARE_NE => self.compare_ne(),
+                op::COMPARE_LT => self.compare_ord(std::cmp::Ordering::is_lt),
+                op::COMPARE_LE => self.compare_ord(std::cmp::Ordering::is_le),
+                op::COMPARE_GT => self.compare_ord(std::cmp::Ordering::is_gt),
+                op::COMPARE_GE => self.compare_ord(std::cmp::Ordering::is_ge),
+                op::COMPARE_IS => self.compare_is(false),
+                op::COMPARE_IS_NOT => self.compare_is(true),
+                op::COMPARE_IN => try_catch!(self, self.compare_in(false)),
+                op::COMPARE_NOT_IN => try_catch!(self, self.compare_in(true)),
+                op::COMPARE_MOD_EQ => try_catch!(self, self.compare_mod_eq()),
                 // Unary Operations
-                Opcode::UnaryNot => {
+                op::UNARY_NOT => {
                     let value = self.pop();
                     let result = !value.py_bool(self.heap, self.interns);
                     value.drop_with_heap(self.heap);
                     self.push(Value::Bool(result));
                 }
-                Opcode::UnaryNeg => {
+                op::UNARY_NEG => {
                     // Unary minus - negate numeric value
                     let value = self.pop();
                     let value_type = value.py_type(Some(self.heap));
@@ -452,7 +455,7 @@ impl<'a, T: ResourceTracker, P: PrintWriter> VM<'a, T, P> {
                         catch!(self, ExcType::unary_type_error("-", value_type));
                     }
                 }
-                Opcode::UnaryPos => {
+                op::UNARY_POS => {
                     // Unary plus - typically a no-op for numbers
                     let value = self.pop();
                     let value_type = value.py_type(Some(self.heap));
@@ -467,7 +470,7 @@ impl<'a, T: ResourceTracker, P: PrintWriter> VM<'a, T, P> {
                         catch!(self, ExcType::unary_type_error("+", value_type));
                     }
                 }
-                Opcode::UnaryInvert => {
+                op::UNARY_INVERT => {
                     // Bitwise NOT
                     let value = self.pop();
                     let value_type = value.py_type(Some(self.heap));
@@ -484,56 +487,56 @@ impl<'a, T: ResourceTracker, P: PrintWriter> VM<'a, T, P> {
                     }
                 }
                 // In-place Operations - route through exception handling
-                Opcode::InplaceAdd => try_catch!(self, self.inplace_add()),
+                op::INPLACE_ADD => try_catch!(self, self.inplace_add()),
                 // Other in-place ops use the same logic as binary ops for now
-                Opcode::InplaceSub => try_catch!(self, self.binary_sub()),
-                Opcode::InplaceMul => try_catch!(self, self.binary_mult()),
-                Opcode::InplaceDiv => try_catch!(self, self.binary_div()),
-                Opcode::InplaceFloorDiv => try_catch!(self, self.binary_floordiv()),
-                Opcode::InplaceMod => try_catch!(self, self.binary_mod()),
-                Opcode::InplacePow => try_catch!(self, self.binary_pow()),
-                Opcode::InplaceAnd => try_catch!(self, self.binary_bitwise(BitwiseOp::And)),
-                Opcode::InplaceOr => try_catch!(self, self.binary_bitwise(BitwiseOp::Or)),
-                Opcode::InplaceXor => try_catch!(self, self.binary_bitwise(BitwiseOp::Xor)),
-                Opcode::InplaceLShift => try_catch!(self, self.binary_bitwise(BitwiseOp::LShift)),
-                Opcode::InplaceRShift => try_catch!(self, self.binary_bitwise(BitwiseOp::RShift)),
+                op::INPLACE_SUB => try_catch!(self, self.binary_sub()),
+                op::INPLACE_MUL => try_catch!(self, self.binary_mult()),
+                op::INPLACE_DIV => try_catch!(self, self.binary_div()),
+                op::INPLACE_FLOOR_DIV => try_catch!(self, self.binary_floordiv()),
+                op::INPLACE_MOD => try_catch!(self, self.binary_mod()),
+                op::INPLACE_POW => try_catch!(self, self.binary_pow()),
+                op::INPLACE_AND => try_catch!(self, self.binary_bitwise(BitwiseOp::And)),
+                op::INPLACE_OR => try_catch!(self, self.binary_bitwise(BitwiseOp::Or)),
+                op::INPLACE_XOR => try_catch!(self, self.binary_bitwise(BitwiseOp::Xor)),
+                op::INPLACE_LSHIFT => try_catch!(self, self.binary_bitwise(BitwiseOp::LShift)),
+                op::INPLACE_RSHIFT => try_catch!(self, self.binary_bitwise(BitwiseOp::RShift)),
                 // Collection Building - route through exception handling
-                Opcode::BuildList => {
+                op::BUILD_LIST => {
                     let count = usize::from(self.fetch_u16());
                     try_catch!(self, self.build_list(count));
                 }
-                Opcode::BuildTuple => {
+                op::BUILD_TUPLE => {
                     let count = usize::from(self.fetch_u16());
                     try_catch!(self, self.build_tuple(count));
                 }
-                Opcode::BuildDict => {
+                op::BUILD_DICT => {
                     let count = usize::from(self.fetch_u16());
                     try_catch!(self, self.build_dict(count));
                 }
-                Opcode::BuildSet => {
+                op::BUILD_SET => {
                     let count = usize::from(self.fetch_u16());
                     try_catch!(self, self.build_set(count));
                 }
-                Opcode::FormatValue => {
+                op::FORMAT_VALUE => {
                     let flags = self.fetch_u8();
                     try_catch!(self, self.format_value(flags));
                 }
-                Opcode::BuildFString => {
+                op::BUILD_FSTRING => {
                     let count = usize::from(self.fetch_u16());
                     try_catch!(self, self.build_fstring(count));
                 }
-                Opcode::ListExtend => {
+                op::LIST_EXTEND => {
                     try_catch!(self, self.list_extend());
                 }
-                Opcode::ListToTuple => {
+                op::LIST_TO_TUPLE => {
                     try_catch!(self, self.list_to_tuple());
                 }
-                Opcode::DictMerge => {
+                op::DICT_MERGE => {
                     let func_name_id = self.fetch_u16();
                     try_catch!(self, self.dict_merge(func_name_id));
                 }
                 // Subscript & Attribute - route through exception handling
-                Opcode::BinarySubscr => {
+                op::BINARY_SUBSCR => {
                     let index = self.pop();
                     let obj = self.pop();
                     let result = obj.py_getitem(&index, self.heap, self.interns);
@@ -544,7 +547,7 @@ impl<'a, T: ResourceTracker, P: PrintWriter> VM<'a, T, P> {
                         Err(e) => catch!(self, e),
                     }
                 }
-                Opcode::StoreSubscr => {
+                op::STORE_SUBSCR => {
                     // Stack order: value, obj, index (TOS)
                     let index = self.pop();
                     let mut obj = self.pop();
@@ -553,7 +556,7 @@ impl<'a, T: ResourceTracker, P: PrintWriter> VM<'a, T, P> {
                     obj.drop_with_heap(self.heap);
                     result?;
                 }
-                Opcode::DeleteSubscr => {
+                op::DELETE_SUBSCR => {
                     // TODO: Implement py_delitem on Value
                     let index = self.pop();
                     let obj = self.pop();
@@ -561,25 +564,25 @@ impl<'a, T: ResourceTracker, P: PrintWriter> VM<'a, T, P> {
                     index.drop_with_heap(self.heap);
                     todo!("DeleteSubscr: py_delitem not yet implemented")
                 }
-                Opcode::LoadAttr => {
+                op::LOAD_ATTR => {
                     let name_idx = self.fetch_u16();
                     let name_id = StringId::from_index(name_idx);
                     try_catch!(self, self.load_attr(name_id));
                 }
-                Opcode::StoreAttr => {
+                op::STORE_ATTR => {
                     let name_idx = self.fetch_u16();
                     let name_id = StringId::from_index(name_idx);
                     try_catch!(self, self.store_attr(name_id));
                 }
-                Opcode::DeleteAttr => {
+                op::DELETE_ATTR => {
                     todo!("DeleteAttr not implemented")
                 }
                 // Control Flow
-                Opcode::Jump => {
+                op::JUMP => {
                     let offset = self.fetch_i16();
                     self.jump_relative(offset);
                 }
-                Opcode::JumpIfTrue => {
+                op::JUMP_IF_TRUE => {
                     let offset = self.fetch_i16();
                     let cond = self.pop();
                     if cond.py_bool(self.heap, self.interns) {
@@ -587,7 +590,7 @@ impl<'a, T: ResourceTracker, P: PrintWriter> VM<'a, T, P> {
                     }
                     cond.drop_with_heap(self.heap);
                 }
-                Opcode::JumpIfFalse => {
+                op::JUMP_IF_FALSE => {
                     let offset = self.fetch_i16();
                     let cond = self.pop();
                     if !cond.py_bool(self.heap, self.interns) {
@@ -595,7 +598,7 @@ impl<'a, T: ResourceTracker, P: PrintWriter> VM<'a, T, P> {
                     }
                     cond.drop_with_heap(self.heap);
                 }
-                Opcode::JumpIfTrueOrPop => {
+                op::JUMP_IF_TRUE_OR_POP => {
                     let offset = self.fetch_i16();
                     if self.peek().py_bool(self.heap, self.interns) {
                         self.jump_relative(offset);
@@ -604,7 +607,7 @@ impl<'a, T: ResourceTracker, P: PrintWriter> VM<'a, T, P> {
                         value.drop_with_heap(self.heap);
                     }
                 }
-                Opcode::JumpIfFalseOrPop => {
+                op::JUMP_IF_FALSE_OR_POP => {
                     let offset = self.fetch_i16();
                     if self.peek().py_bool(self.heap, self.interns) {
                         let value = self.pop();
@@ -614,7 +617,7 @@ impl<'a, T: ResourceTracker, P: PrintWriter> VM<'a, T, P> {
                     }
                 }
                 // Iteration - route through exception handling
-                Opcode::GetIter => {
+                op::GET_ITER => {
                     let value = self.pop();
                     // Create a ForIterator from the value and store on heap
                     match ForIterator::new(value, self.heap, self.interns) {
@@ -625,7 +628,7 @@ impl<'a, T: ResourceTracker, P: PrintWriter> VM<'a, T, P> {
                         Err(e) => catch!(self, e),
                     }
                 }
-                Opcode::ForIter => {
+                op::FOR_ITER => {
                     let offset = self.fetch_i16();
                     // Peek at the iterator on TOS and extract heap_id
                     let Value::Ref(heap_id) = *self.peek() else {
@@ -651,7 +654,7 @@ impl<'a, T: ResourceTracker, P: PrintWriter> VM<'a, T, P> {
                     }
                 }
                 // Function Calls
-                Opcode::CallFunction => {
+                op::CALL_FUNCTION => {
                     let arg_count = usize::from(self.fetch_u8());
 
                     // Pop arguments in reverse order (TOS is last arg)
@@ -673,7 +676,7 @@ impl<'a, T: ResourceTracker, P: PrintWriter> VM<'a, T, P> {
                         Err(err) => catch!(self, err),
                     }
                 }
-                Opcode::CallFunctionKw => {
+                op::CALL_FUNCTION_KW => {
                     // Fetch operands: pos_count, kw_count, then kw_count name indices
                     let pos_count = usize::from(self.fetch_u8());
                     let kw_count = usize::from(self.fetch_u8());
@@ -721,7 +724,7 @@ impl<'a, T: ResourceTracker, P: PrintWriter> VM<'a, T, P> {
                         Err(err) => catch!(self, err),
                     }
                 }
-                Opcode::CallMethod => {
+                op::CALL_METHOD => {
                     // CallMethod: u16 name_id, u8 arg_count
                     // Stack: [obj, arg1, arg2, ..., argN] -> [result]
                     let name_idx = self.fetch_u16();
@@ -740,10 +743,10 @@ impl<'a, T: ResourceTracker, P: PrintWriter> VM<'a, T, P> {
                         Err(err) => catch!(self, err),
                     }
                 }
-                Opcode::CallExternal => {
+                op::CALL_EXTERNAL => {
                     todo!("CallExternal")
                 }
-                Opcode::CallFunctionEx => {
+                op::CALL_FUNCTION_EX => {
                     let flags = self.fetch_u8();
                     let has_kwargs = (flags & 0x01) != 0;
 
@@ -770,7 +773,7 @@ impl<'a, T: ResourceTracker, P: PrintWriter> VM<'a, T, P> {
                     }
                 }
                 // Function Definition
-                Opcode::MakeFunction => {
+                op::MAKE_FUNCTION => {
                     let func_idx = self.fetch_u16();
                     let defaults_count = usize::from(self.fetch_u8());
                     let func_id = FunctionId::from_index(func_idx);
@@ -787,7 +790,7 @@ impl<'a, T: ResourceTracker, P: PrintWriter> VM<'a, T, P> {
                         self.push(Value::Ref(heap_id));
                     }
                 }
-                Opcode::MakeClosure => {
+                op::MAKE_CLOSURE => {
                     let func_idx = self.fetch_u16();
                     let defaults_count = usize::from(self.fetch_u8());
                     let cell_count = usize::from(self.fetch_u8());
@@ -826,15 +829,15 @@ impl<'a, T: ResourceTracker, P: PrintWriter> VM<'a, T, P> {
                     self.push(Value::Ref(heap_id));
                 }
                 // Exception Handling
-                Opcode::Raise => {
+                op::RAISE => {
                     let exc = self.pop();
                     let error = self.make_exception(exc, true); // is_raise=true, hide caret
                     catch!(self, error);
                 }
-                Opcode::RaiseFrom => {
+                op::RAISE_FROM => {
                     todo!("RaiseFrom")
                 }
-                Opcode::Reraise => {
+                op::RERAISE => {
                     // Pop the current exception from the stack to re-raise it
                     // If caught, handle_exception will push it back
                     let error = if let Some(exc) = self.exception_stack.pop() {
@@ -849,14 +852,14 @@ impl<'a, T: ResourceTracker, P: PrintWriter> VM<'a, T, P> {
                     };
                     catch!(self, error);
                 }
-                Opcode::ClearException => {
+                op::CLEAR_EXCEPTION => {
                     // Pop the current exception from the stack
                     // This restores the previous exception context (if any)
                     if let Some(exc) = self.exception_stack.pop() {
                         exc.drop_with_heap(self.heap);
                     }
                 }
-                Opcode::CheckExcMatch => {
+                op::CHECK_EXC_MATCH => {
                     // Stack: [exception, exc_type] -> [exception, bool]
                     let exc_type = self.pop();
                     let exception = self.peek();
@@ -866,7 +869,7 @@ impl<'a, T: ResourceTracker, P: PrintWriter> VM<'a, T, P> {
                     self.push(Value::Bool(result));
                 }
                 // Return
-                Opcode::ReturnValue => {
+                op::RETURN_VALUE => {
                     let value = self.pop();
                     if self.frames.len() == 1 {
                         // Module-level return - we're done
@@ -877,17 +880,18 @@ impl<'a, T: ResourceTracker, P: PrintWriter> VM<'a, T, P> {
                     self.push(value);
                 }
                 // Unpacking - route through exception handling
-                Opcode::UnpackSequence => {
+                op::UNPACK_SEQUENCE => {
                     let count = usize::from(self.fetch_u8());
                     try_catch!(self, self.unpack_sequence(count));
                 }
-                Opcode::UnpackEx => {
+                op::UNPACK_EX => {
                     todo!("UnpackEx not implemented")
                 }
                 // Special
-                Opcode::Nop => {
+                op::NOP => {
                     // No operation
                 }
+                other => panic!("invalid opcode in bytecode: {other:?}"),
             }
         }
     }
@@ -1003,8 +1007,7 @@ impl<'a, T: ResourceTracker, P: PrintWriter> VM<'a, T, P> {
     /// Fetches and decodes the next opcode.
     #[inline]
     fn fetch_opcode(&mut self) -> Opcode {
-        let byte = self.fetch_byte();
-        Opcode::try_from(byte).expect("invalid opcode in bytecode")
+        self.fetch_byte().into()
     }
 
     /// Fetches a u8 operand.
