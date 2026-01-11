@@ -308,7 +308,7 @@ impl EitherProgress {
         print_callback: Option<Py<PyAny>>,
     ) -> PyResult<Bound<'_, PyAny>> {
         let (function_name, args, kwargs, snapshot) = match self {
-            EitherProgress::NoLimit(p) => match p {
+            Self::NoLimit(p) => match p {
                 RunProgress::Complete(result) => return PyMontyComplete::create(py, &result),
                 RunProgress::FunctionCall {
                     function_name,
@@ -317,7 +317,7 @@ impl EitherProgress {
                     state,
                 } => (function_name, args, kwargs, EitherSnapshot::NoLimit(state)),
             },
-            EitherProgress::Limited(p) => match p {
+            Self::Limited(p) => match p {
                 RunProgress::Complete(result) => return PyMontyComplete::create(py, &result),
                 RunProgress::FunctionCall {
                     function_name,
@@ -409,7 +409,7 @@ impl PyMontySnapshot {
         } else if let Some(exc) = kwargs.get_item(intern!(py, "exception"))? {
             // Exception provided
             let py_err = PyErr::from_value(exc.into_any());
-            exc_py_to_monty(py, py_err).into()
+            exc_py_to_monty(py, &py_err).into()
         } else {
             // wrong key in kwargs
             return Err(PyTypeError::new_err(ARGS_ERROR));
@@ -624,11 +624,11 @@ impl<'py> CallbackStringPrint<'py> {
 
 impl PrintWriter for CallbackStringPrint<'_> {
     fn stdout_write(&mut self, output: Cow<'_, str>) -> Result<(), MontyException> {
-        self.write(output).map_err(|e| exc_py_to_monty(self.0.py(), e))
+        self.write(output).map_err(|e| exc_py_to_monty(self.0.py(), &e))
     }
 
     fn stdout_push(&mut self, end: char) -> Result<(), MontyException> {
-        self.write(end).map_err(|e| exc_py_to_monty(self.0.py(), e))
+        self.write(end).map_err(|e| exc_py_to_monty(self.0.py(), &e))
     }
 }
 

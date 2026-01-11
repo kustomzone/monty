@@ -264,7 +264,7 @@ pub enum Node<F> {
     /// this sets the field value. Returns an error for immutable objects.
     /// Supports chained attribute access on the left-hand side.
     AttrAssign {
-        object: Box<ExprLoc>,
+        object: ExprLoc,
         attr: Attr,
         target_position: CodeRange,
         value: ExprLoc,
@@ -272,13 +272,13 @@ pub enum Node<F> {
     For {
         target: Identifier,
         iter: ExprLoc,
-        body: Vec<Node<F>>,
-        or_else: Vec<Node<F>>,
+        body: Vec<Self>,
+        or_else: Vec<Self>,
     },
     If {
         test: ExprLoc,
-        body: Vec<Node<F>>,
-        or_else: Vec<Node<F>>,
+        body: Vec<Self>,
+        or_else: Vec<Self>,
     },
     FunctionDef(F),
     /// Global variable declaration. Only present in parsed form, consumed during prepare.
@@ -301,7 +301,7 @@ pub enum Node<F> {
     ///
     /// Executes body, catches matching exceptions with handlers, runs else if no exception,
     /// and always runs finally.
-    Try(Try<Node<F>>),
+    Try(Try<Self>),
 }
 
 /// A prepared function definition with resolved names and scope information.
@@ -316,7 +316,7 @@ pub struct PreparedFunctionDef {
     /// The function signature with parameter names and default counts.
     pub signature: Signature,
     /// The prepared function body with resolved names.
-    pub body: Vec<Node<PreparedFunctionDef>>,
+    pub body: Vec<Node<Self>>,
     /// Number of local variable slots needed in the namespace.
     pub namespace_size: usize,
     /// Enclosing namespace slots for variables captured from enclosing scopes.

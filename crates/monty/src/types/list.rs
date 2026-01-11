@@ -116,14 +116,14 @@ impl List {
         let value = args.get_zero_one_arg("list")?;
         match value {
             None => {
-                let heap_id = heap.allocate(HeapData::List(List::new(Vec::new())))?;
+                let heap_id = heap.allocate(HeapData::List(Self::new(Vec::new())))?;
                 Ok(Value::Ref(heap_id))
             }
             Some(v) => {
                 let mut iter = ForIterator::new(v, heap, interns)?;
                 let items = iter.collect(heap, interns)?;
                 iter.drop_with_heap(heap);
-                let heap_id = heap.allocate(HeapData::List(List::new(items)))?;
+                let heap_id = heap.allocate(HeapData::List(Self::new(items)))?;
                 Ok(Value::Ref(heap_id))
             }
         }
@@ -157,7 +157,7 @@ impl PyTrait for List {
         };
 
         // Convert to usize, handling negative indices (Python-style: -1 = last element)
-        let len = self.0.len() as i64;
+        let len = i64::try_from(self.0.len()).expect("list length exceeds i64::MAX");
         let normalized_index = if index < 0 { index + len } else { index };
 
         // Bounds check
@@ -166,7 +166,9 @@ impl PyTrait for List {
         }
 
         // Return clone of the item with proper refcount increment
-        Ok(self.0[normalized_index as usize].clone_with_heap(heap))
+        // Safety: normalized_index is validated to be in [0, len) above
+        let idx = usize::try_from(normalized_index).expect("list index validated non-negative");
+        Ok(self.0[idx].clone_with_heap(heap))
     }
 
     fn py_eq(&self, other: &Self, heap: &mut Heap<impl ResourceTracker>, interns: &Interns) -> bool {
@@ -215,7 +217,7 @@ impl PyTrait for List {
         let mut result: Vec<Value> = self.0.iter().map(|obj| obj.clone_with_heap(heap)).collect();
         let other_cloned: Vec<Value> = other.0.iter().map(|obj| obj.clone_with_heap(heap)).collect();
         result.extend(other_cloned);
-        let id = heap.allocate(HeapData::List(List::new(result)))?;
+        let id = heap.allocate(HeapData::List(Self::new(result)))?;
         Ok(Some(Value::Ref(id)))
     }
 
@@ -265,7 +267,24 @@ impl PyTrait for List {
             }
             attr::INSERT => {
                 let (index_obj, item) = args.get_two_args("insert")?;
-                let index = index_obj.as_int()? as usize;
+                // Python's insert() handles negative indices by adding len
+                // If still negative after adding len, clamps to 0
+                // If >= len, appends to end
+                let index_i64 = index_obj.as_int()?;
+                let len = self.0.len();
+                let len_i64 = i64::try_from(len).expect("list length exceeds i64::MAX");
+                let index = if index_i64 < 0 {
+                    // Negative index: add length, clamp to 0 if still negative
+                    let adjusted = index_i64 + len_i64;
+                    if adjusted < 0 {
+                        0
+                    } else {
+                        usize::try_from(adjusted).expect("adjusted index fits in usize")
+                    }
+                } else {
+                    // Positive index: clamp to len if too large
+                    usize::try_from(index_i64).unwrap_or(len)
+                };
                 self.insert(heap, index, item);
                 Ok(Value::None)
             }

@@ -66,14 +66,14 @@ impl Tuple {
         let value = args.get_zero_one_arg("tuple")?;
         match value {
             None => {
-                let heap_id = heap.allocate(HeapData::Tuple(Tuple::new(Vec::new())))?;
+                let heap_id = heap.allocate(HeapData::Tuple(Self::new(Vec::new())))?;
                 Ok(Value::Ref(heap_id))
             }
             Some(v) => {
                 let mut iter = ForIterator::new(v, heap, interns)?;
                 let items = iter.collect(heap, interns)?;
                 iter.drop_with_heap(heap);
-                let heap_id = heap.allocate(HeapData::Tuple(Tuple::new(items)))?;
+                let heap_id = heap.allocate(HeapData::Tuple(Self::new(items)))?;
                 Ok(Value::Ref(heap_id))
             }
         }
@@ -113,7 +113,7 @@ impl PyTrait for Tuple {
         };
 
         // Convert to usize, handling negative indices (Python-style: -1 = last element)
-        let len = self.0.len() as i64;
+        let len = i64::try_from(self.0.len()).expect("tuple length exceeds i64::MAX");
         let normalized_index = if index < 0 { index + len } else { index };
 
         // Bounds check
@@ -122,7 +122,9 @@ impl PyTrait for Tuple {
         }
 
         // Return clone of the item with proper refcount increment
-        Ok(self.0[normalized_index as usize].clone_with_heap(heap))
+        // Safety: normalized_index is validated to be in [0, len) above
+        let idx = usize::try_from(normalized_index).expect("tuple index validated non-negative");
+        Ok(self.0[idx].clone_with_heap(heap))
     }
 
     fn py_eq(&self, other: &Self, heap: &mut Heap<impl ResourceTracker>, interns: &Interns) -> bool {
