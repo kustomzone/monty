@@ -275,30 +275,30 @@ impl<T: ResourceTracker, P: PrintWriter> VM<'_, T, P> {
     pub(super) fn unpack_sequence(&mut self, count: usize) -> Result<(), RunError> {
         let value = self.pop();
 
-        // Handle interned strings (string literals stored inline, not on heap)
-        if let Value::InternString(string_id) = &value {
-            let s = self.interns.get_str(*string_id);
-            let str_len = s.chars().count();
-            if str_len != count {
-                return Err(unpack_size_error(count, str_len));
+        // Copy values without incrementing refcounts (avoids borrow conflict with heap.get).
+        // For strings, we allocate new string values for each character.
+        let items: Vec<Value> = match &value {
+            // Interned strings (string literals stored inline, not on heap)
+            Value::InternString(string_id) => {
+                let s = self.interns.get_str(*string_id);
+                let str_len = s.chars().count();
+                if str_len != count {
+                    return Err(unpack_size_error(count, str_len));
+                }
+                // Allocate each character as a new string
+                let mut items = Vec::with_capacity(str_len);
+                for c in s.chars() {
+                    let char_id = self.heap.allocate(HeapData::Str(Str::new(c.to_string())))?;
+                    items.push(Value::Ref(char_id));
+                }
+                // Push items in reverse order so first item is on top
+                for item in items.into_iter().rev() {
+                    self.push(item);
+                }
+                return Ok(());
             }
-            // Allocate each character as a new string
-            let mut items = Vec::with_capacity(str_len);
-            for c in s.chars() {
-                let char_id = self.heap.allocate(HeapData::Str(Str::new(c.to_string())))?;
-                items.push(Value::Ref(char_id));
-            }
-            // Push items in reverse order so first item is on top
-            for item in items.into_iter().rev() {
-                self.push(item);
-            }
-            return Ok(());
-        }
-
-        // First, copy values without incrementing refcounts (avoids borrow conflict with heap.get)
-        // For strings, we need to allocate new string values for each character
-        let items: Vec<Value> = if let Value::Ref(heap_id) = &value {
-            match self.heap.get(*heap_id) {
+            // Heap-allocated sequences
+            Value::Ref(heap_id) => match self.heap.get(*heap_id) {
                 HeapData::List(list) => {
                     let list_len = list.len();
                     if list_len != count {
@@ -331,7 +331,7 @@ impl<T: ResourceTracker, P: PrintWriter> VM<'_, T, P> {
                         let char_id = self.heap.allocate(HeapData::Str(Str::new(c.to_string())))?;
                         items.push(Value::Ref(char_id));
                     }
-                    // Skip the later drop since we already dropped
+                    // Push items in reverse order so first item is on top
                     for item in items.into_iter().rev() {
                         self.push(item);
                     }
@@ -342,11 +342,13 @@ impl<T: ResourceTracker, P: PrintWriter> VM<'_, T, P> {
                     value.drop_with_heap(self.heap);
                     return Err(unpack_type_error(type_name));
                 }
+            },
+            // Non-iterable types
+            _ => {
+                let type_name = value.py_type(Some(self.heap));
+                value.drop_with_heap(self.heap);
+                return Err(unpack_type_error(type_name));
             }
-        } else {
-            let type_name = value.py_type(Some(self.heap));
-            value.drop_with_heap(self.heap);
-            return Err(unpack_type_error(type_name));
         };
 
         // IMPORTANT: Increment refcounts BEFORE dropping the container.
