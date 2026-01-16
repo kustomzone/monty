@@ -2,7 +2,7 @@
 
 use crate::{
     args::ArgValues,
-    exception_private::{exc_err_fmt, ExcType, RunResult},
+    exception_private::{ExcType, RunResult, SimpleException},
     heap::{Heap, HeapData},
     resource::ResourceTracker,
     types::{PyTrait, Tuple},
@@ -21,7 +21,7 @@ pub fn builtin_divmod(heap: &mut Heap<impl ResourceTracker>, args: ArgValues) ->
     let result = match (&a, &b) {
         (Value::Int(x), Value::Int(y)) => {
             if *y == 0 {
-                exc_err_fmt!(ExcType::ZeroDivisionError; "integer division or modulo by zero")
+                Err(SimpleException::new_msg(ExcType::ZeroDivisionError, "integer division or modulo by zero").into())
             } else {
                 // Python uses floor division (toward negative infinity), not Euclidean
                 let (quot, rem) = floor_divmod(*x, *y);
@@ -31,7 +31,7 @@ pub fn builtin_divmod(heap: &mut Heap<impl ResourceTracker>, args: ArgValues) ->
         }
         (Value::Float(x), Value::Float(y)) => {
             if *y == 0.0 {
-                exc_err_fmt!(ExcType::ZeroDivisionError; "float divmod()")
+                Err(SimpleException::new_msg(ExcType::ZeroDivisionError, "float divmod()").into())
             } else {
                 let quot = (x / y).floor();
                 let rem = x - quot * y;
@@ -42,7 +42,7 @@ pub fn builtin_divmod(heap: &mut Heap<impl ResourceTracker>, args: ArgValues) ->
         }
         (Value::Int(x), Value::Float(y)) => {
             if *y == 0.0 {
-                exc_err_fmt!(ExcType::ZeroDivisionError; "float divmod()")
+                Err(SimpleException::new_msg(ExcType::ZeroDivisionError, "float divmod()").into())
             } else {
                 let xf = *x as f64;
                 let quot = (xf / y).floor();
@@ -54,7 +54,7 @@ pub fn builtin_divmod(heap: &mut Heap<impl ResourceTracker>, args: ArgValues) ->
         }
         (Value::Float(x), Value::Int(y)) => {
             if *y == 0 {
-                exc_err_fmt!(ExcType::ZeroDivisionError; "float divmod()")
+                Err(SimpleException::new_msg(ExcType::ZeroDivisionError, "float divmod()").into())
             } else {
                 let yf = *y as f64;
                 let quot = (x / yf).floor();
@@ -65,7 +65,13 @@ pub fn builtin_divmod(heap: &mut Heap<impl ResourceTracker>, args: ArgValues) ->
             }
         }
         _ => {
-            exc_err_fmt!(ExcType::TypeError; "unsupported operand type(s) for divmod(): '{}' and '{}'", a.py_type(heap), b.py_type(heap))
+            let a_type = a.py_type(heap);
+            let b_type = b.py_type(heap);
+            Err(SimpleException::new_msg(
+                ExcType::TypeError,
+                format!("unsupported operand type(s) for divmod(): '{a_type}' and '{b_type}'"),
+            )
+            .into())
         }
     };
 

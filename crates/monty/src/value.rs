@@ -11,7 +11,7 @@ use ahash::AHashSet;
 
 use crate::{
     builtins::Builtins,
-    exception_private::{exc_err_fmt, ExcType, RunError, RunResult},
+    exception_private::{ExcType, RunError, RunResult, SimpleException},
     heap::{Heap, HeapData, HeapId},
     intern::{BytesId, ExtFunctionId, FunctionId, Interns, StringId},
     resource::ResourceTracker,
@@ -1106,11 +1106,12 @@ impl Value {
         }
     }
 
-    pub fn as_int(&self) -> RunResult<i64> {
-        match self {
-            Self::Int(i) => Ok(*i),
-            // TODO use self.type
-            _ => exc_err_fmt!(ExcType::TypeError; "'{self:?}' object cannot be interpreted as an integer"),
+    pub fn as_int(&self, heap: &Heap<impl ResourceTracker>) -> RunResult<i64> {
+        if let Self::Int(i) = self {
+            Ok(*i)
+        } else {
+            let msg = format!("'{}' object cannot be interpreted as an integer", self.py_type(heap));
+            Err(SimpleException::new_msg(ExcType::TypeError, msg).into())
         }
     }
 
