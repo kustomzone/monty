@@ -467,6 +467,33 @@ impl<'i> Prepare<'i> {
                         finally,
                     }));
                 }
+                Node::Import { module_name, binding } => {
+                    // Resolve the binding identifier to get the namespace slot
+                    let (resolved_binding, _) = self.get_id(binding);
+                    new_nodes.push(Node::Import {
+                        module_name,
+                        binding: resolved_binding,
+                    });
+                }
+                Node::ImportFrom {
+                    module_name,
+                    names,
+                    position,
+                } => {
+                    // Resolve each binding identifier to get namespace slots
+                    let resolved_names = names
+                        .into_iter()
+                        .map(|(import_name, binding)| {
+                            let (resolved_binding, _) = self.get_id(binding);
+                            (import_name, resolved_binding)
+                        })
+                        .collect();
+                    new_nodes.push(Node::ImportFrom {
+                        module_name,
+                        names: resolved_names,
+                        position,
+                    });
+                }
             }
         }
         Ok(new_nodes)
@@ -1493,6 +1520,16 @@ fn collect_scope_info_from_node(
                 collect_scope_info_from_node(n, global_names, nonlocal_names, assigned_names, interner);
             }
         }
+        // Import creates a binding for the module name (or alias)
+        Node::Import { binding, .. } => {
+            assigned_names.insert(interner.get_str(binding.name_id).to_string());
+        }
+        // ImportFrom creates bindings for each imported name (or alias)
+        Node::ImportFrom { names, .. } => {
+            for (_import_name, binding) in names {
+                assigned_names.insert(interner.get_str(binding.name_id).to_string());
+            }
+        }
         // These don't create new names
         Node::Pass | Node::Expr(_) | Node::Return(_) | Node::ReturnNone | Node::Raise(_) | Node::Assert { .. } => {}
     }
@@ -1672,6 +1709,8 @@ fn collect_referenced_names_from_node(node: &ParseNode, referenced: &mut AHashSe
                 collect_referenced_names_from_node(n, referenced, interner);
             }
         }
+        // Imports create bindings but don't reference names
+        Node::Import { .. } | Node::ImportFrom { .. } => {}
         Node::Pass | Node::ReturnNone | Node::Global { .. } | Node::Nonlocal { .. } => {}
     }
 }

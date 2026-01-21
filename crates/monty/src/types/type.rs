@@ -34,6 +34,7 @@ pub enum Type {
     Bytes,
     List,
     Tuple,
+    NamedTuple,
     Dict,
     Set,
     FrozenSet,
@@ -44,6 +45,13 @@ pub enum Type {
     BuiltinFunction,
     Cell,
     Iterator,
+    Module,
+    /// Marker types like stdout/stderr - displays as "TextIOWrapper"
+    #[strum(serialize = "TextIOWrapper")]
+    TextIOWrapper,
+    /// typing module special forms (Any, Optional, Union, etc.) - displays as "typing._SpecialForm"
+    #[strum(serialize = "typing._SpecialForm")]
+    SpecialForm,
 }
 
 impl fmt::Display for Type {
@@ -60,6 +68,7 @@ impl fmt::Display for Type {
             Self::Bytes => f.write_str("bytes"),
             Self::List => f.write_str("list"),
             Self::Tuple => f.write_str("tuple"),
+            Self::NamedTuple => f.write_str("namedtuple"),
             Self::Dict => f.write_str("dict"),
             Self::Set => f.write_str("set"),
             Self::FrozenSet => f.write_str("frozenset"),
@@ -69,6 +78,9 @@ impl fmt::Display for Type {
             Self::BuiltinFunction => f.write_str("builtin_function_or_method"),
             Self::Cell => f.write_str("cell"),
             Self::Iterator => f.write_str("iterator"),
+            Self::Module => f.write_str("module"),
+            Self::TextIOWrapper => f.write_str("_io.TextIOWrapper"),
+            Self::SpecialForm => f.write_str("typing._SpecialForm"),
         }
     }
 }

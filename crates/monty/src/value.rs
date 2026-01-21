@@ -2,7 +2,7 @@ use std::{
     borrow::Cow,
     cmp::Ordering,
     collections::hash_map::DefaultHasher,
-    fmt::Write,
+    fmt::{self, Write},
     hash::{Hash, Hasher},
     mem::discriminant,
 };
@@ -20,29 +20,6 @@ use crate::{
     resource::{LARGE_RESULT_THRESHOLD, ResourceTracker},
     types::{LongInt, PyTrait, Type, bytes::bytes_repr_fmt, str::string_repr_fmt},
 };
-
-/// Bitwise operation type for `py_bitwise`.
-#[derive(Debug, Clone, Copy)]
-pub enum BitwiseOp {
-    And,
-    Or,
-    Xor,
-    LShift,
-    RShift,
-}
-
-impl BitwiseOp {
-    /// Returns the operator symbol for error messages.
-    pub fn as_str(self) -> &'static str {
-        match self {
-            Self::And => "&",
-            Self::Or => "|",
-            Self::Xor => "^",
-            Self::LShift => "<<",
-            Self::RShift => ">>",
-        }
-    }
-}
 
 /// Primary value type representing Python objects at runtime.
 ///
@@ -76,6 +53,9 @@ pub(crate) enum Value {
     DefFunction(FunctionId),
     /// Reference to an external function defined on the host
     ExtFunction(ExtFunctionId),
+    /// A marker value representing special objects like sys.stdout/stderr.
+    /// These exist but have minimal functionality in the sandboxed environment.
+    Marker(Marker),
 
     // Heap-allocated values (stored in arena)
     Ref(HeapId),
@@ -119,6 +99,7 @@ impl PyTrait for Value {
             Self::InternBytes(_) => Type::Bytes,
             Self::Builtin(c) => c.py_type(),
             Self::DefFunction(_) | Self::ExtFunction(_) => Type::Function,
+            Self::Marker(m) => m.py_type(),
             Self::Ref(id) => heap.get(*id).py_type(heap),
             #[cfg(feature = "ref-count-panic")]
             Self::Dereferenced => panic!("Cannot access Dereferenced object"),
@@ -226,6 +207,8 @@ impl PyTrait for Value {
             // Builtins equality - just check the enums are equal
             (Self::Builtin(b1), Self::Builtin(b2)) => b1 == b2,
             (Self::DefFunction(f1), Self::DefFunction(f2)) => f1 == f2,
+            // Markers compare equal if they're the same variant
+            (Self::Marker(m1), Self::Marker(m2)) => m1 == m2,
 
             _ => false,
         }
@@ -297,7 +280,8 @@ impl PyTrait for Value {
             Self::Int(v) => *v != 0,
             Self::Float(f) => *f != 0.0,
             Self::Builtin(_) => true,                            // Builtins are always truthy
-            Self::DefFunction(_) | Self::ExtFunction(_) => true, // same
+            Self::DefFunction(_) | Self::ExtFunction(_) => true, // Functions are always truthy
+            Self::Marker(_) => true,                             // Markers are always truthy
             Self::InternString(string_id) => !interns.get_str(*string_id).is_empty(),
             Self::InternBytes(bytes_id) => !interns.get_bytes(*bytes_id).is_empty(),
             Self::Ref(id) => heap.get(*id).py_bool(heap, interns),
@@ -335,6 +319,7 @@ impl PyTrait for Value {
             }
             Self::InternString(string_id) => string_repr_fmt(interns.get_str(*string_id), f),
             Self::InternBytes(bytes_id) => bytes_repr_fmt(interns.get_bytes(*bytes_id), f),
+            Self::Marker(m) => m.py_repr_fmt(f),
             Self::Ref(id) => {
                 if heap_ids.contains(id) {
                     // Cycle detected - write type-specific placeholder following Python semantics
@@ -1428,6 +1413,8 @@ impl Value {
             Self::Builtin(c) => builtin_value_id(*c),
             Self::DefFunction(f_id) => function_value_id(*f_id),
             Self::ExtFunction(f_id) => ext_function_value_id(*f_id),
+            // Markers get deterministic IDs based on discriminant
+            Self::Marker(m) => marker_value_id(*m),
             #[cfg(feature = "ref-count-panic")]
             Self::Dereferenced => panic!("Cannot get id of Dereferenced object"),
         }
@@ -1437,6 +1424,19 @@ impl Value {
         match self {
             Self::Ref(id) => Some(*id),
             _ => None,
+        }
+    }
+
+    /// Returns the module name if this value is a module, otherwise returns "<unknown>".
+    ///
+    /// Used for error messages in `from module import name` when the name doesn't exist.
+    pub fn module_name(&self, heap: &Heap<impl ResourceTracker>, interns: &Interns) -> String {
+        match self {
+            Self::Ref(id) => match heap.get(*id) {
+                HeapData::Module(module) => interns.get_str(module.name()).to_string(),
+                _ => "<unknown>".to_string(),
+            },
+            _ => "<unknown>".to_string(),
         }
     }
 
@@ -1491,6 +1491,8 @@ impl Value {
             // Hash functions based on function ID
             Self::DefFunction(f_id) => f_id.hash(&mut hasher),
             Self::ExtFunction(f_id) => f_id.hash(&mut hasher),
+            // Markers are hashable based on their discriminant (already included above)
+            Self::Marker(m) => m.hash(&mut hasher),
             Self::InternString(_) | Self::InternBytes(_) | Self::Ref(_) => unreachable!("covered above"),
             #[cfg(feature = "ref-count-panic")]
             Self::Dereferenced => panic!("Cannot access Dereferenced object"),
@@ -1547,7 +1549,10 @@ impl Value {
 
     /// Gets an attribute from this value.
     ///
-    /// Currently only Dataclass objects support attribute access.
+    /// Supports attribute access for:
+    /// - Dataclass objects: returns field values
+    /// - Module objects: returns module attributes
+    ///
     /// Returns AttributeError for other types.
     pub fn py_get_attr(
         &self,
@@ -1559,28 +1564,71 @@ impl Value {
 
         if let Self::Ref(heap_id) = self {
             let heap_id = *heap_id;
-            let is_dataclass = matches!(heap.get(heap_id), HeapData::Dataclass(_));
+            let heap_data = heap.get(heap_id);
 
-            if is_dataclass {
-                let name_value = Self::InternString(name_id);
-                heap.with_entry_mut(heap_id, |heap, data| {
-                    if let HeapData::Dataclass(dc) = data {
-                        match dc.get_attr(&name_value, heap, interns) {
-                            Ok(Some(value)) => Ok(value.clone_with_heap(heap)),
-                            Ok(None) => {
-                                // Use the dataclass's actual name for the error message
-                                Err(ExcType::attribute_error_not_found(dc.name(), attr_name))
+            match heap_data {
+                HeapData::Dataclass(_) => {
+                    let name_value = Self::InternString(name_id);
+                    heap.with_entry_mut(heap_id, |heap, data| {
+                        if let HeapData::Dataclass(dc) = data {
+                            match dc.get_attr(&name_value, heap, interns) {
+                                Ok(Some(value)) => Ok(value.clone_with_heap(heap)),
+                                Ok(None) => {
+                                    // Use the dataclass's actual name for the error message
+                                    Err(ExcType::attribute_error_not_found(dc.name(), attr_name))
+                                }
+                                Err(e) => Err(e),
                             }
-                            Err(e) => Err(e),
+                        } else {
+                            unreachable!("type changed during borrow")
                         }
+                    })
+                }
+                HeapData::Module(_) => {
+                    // Look up attribute in module's attrs dict
+                    let name_value = Self::InternString(name_id);
+                    heap.with_entry_mut(heap_id, |heap, data| {
+                        if let HeapData::Module(module) = data {
+                            if let Some(value) = module.get_attr(&name_value, heap, interns) {
+                                // Increment refcount for Ref values
+                                if let Self::Ref(ref_id) = &value {
+                                    heap.inc_ref(*ref_id);
+                                }
+                                Ok(value)
+                            } else {
+                                let module_name = interns.get_str(module.name());
+                                Err(ExcType::attribute_error_module(module_name, attr_name))
+                            }
+                        } else {
+                            unreachable!("type changed during borrow")
+                        }
+                    })
+                }
+                HeapData::NamedTuple(nt) => {
+                    // Look up attribute by field name
+                    // Copy the value (and type_name for error) without incrementing refcount while we hold the borrow
+                    if let Some(value) = nt.get_by_name(name_id) {
+                        let copied = value.copy_for_extend();
+                        // Increment refcount for heap refs
+                        if let Self::Ref(ref_id) = &copied {
+                            heap.inc_ref(*ref_id);
+                        }
+                        Ok(copied)
                     } else {
-                        unreachable!("type changed during borrow")
+                        Err(ExcType::attribute_error_not_found(
+                            interns.get_str(nt.type_name()),
+                            attr_name,
+                        ))
                     }
-                })
-            } else {
-                let type_name = heap.get(heap_id).py_type(heap);
-                Err(ExcType::attribute_error(type_name, attr_name))
+                }
+                _ => {
+                    let type_name = heap_data.py_type(heap);
+                    Err(ExcType::attribute_error(type_name, attr_name))
+                }
             }
+        } else if let Self::Marker(marker) = self {
+            // Markers don't support attribute access - report the marker's actual type
+            Err(ExcType::attribute_error(marker.py_type(), attr_name))
         } else {
             let type_name = self.py_type(heap);
             Err(ExcType::attribute_error(type_name, attr_name))
@@ -1818,6 +1866,7 @@ impl Value {
             Self::ExtFunction(f) => Self::ExtFunction(*f),
             Self::InternString(s) => Self::InternString(*s),
             Self::InternBytes(b) => Self::InternBytes(*b),
+            Self::Marker(m) => Self::Marker(*m),
             Self::Ref(id) => Self::Ref(*id), // Caller must increment refcount!
             #[cfg(feature = "ref-count-panic")]
             Self::Dereferenced => panic!("Cannot copy Dereferenced object"),
@@ -1922,6 +1971,72 @@ impl Attr {
     }
 }
 
+/// Bitwise operation type for `py_bitwise`.
+#[derive(Debug, Clone, Copy)]
+pub enum BitwiseOp {
+    And,
+    Or,
+    Xor,
+    LShift,
+    RShift,
+}
+
+impl BitwiseOp {
+    /// Returns the operator symbol for error messages.
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::And => "&",
+            Self::Or => "|",
+            Self::Xor => "^",
+            Self::LShift => "<<",
+            Self::RShift => ">>",
+        }
+    }
+}
+
+/// Marker values for special objects that exist but have minimal functionality.
+///
+/// These are used for:
+/// - System objects like `sys.stdout` and `sys.stderr` that need to exist but don't
+///   provide functionality in the sandboxed environment
+/// - Typing constructs from the `typing` module that are imported for type hints but
+///   don't need runtime functionality
+///
+/// Wraps a `StaticStrings` variant to leverage its string conversion capabilities.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, serde::Serialize, serde::Deserialize)]
+pub(crate) struct Marker(pub StaticStrings);
+
+impl Marker {
+    /// Returns the Python type of this marker.
+    ///
+    /// System markers (stdout, stderr) are `TextIOWrapper`.
+    /// `typing.Union` has type `type` (matching CPython).
+    /// Other typing markers (Any, Optional, etc.) are `_SpecialForm`.
+    pub(crate) fn py_type(self) -> Type {
+        match self.0 {
+            StaticStrings::Stdout | StaticStrings::Stderr => Type::TextIOWrapper,
+            StaticStrings::UnionType => Type::Type,
+            _ => Type::SpecialForm,
+        }
+    }
+
+    /// Writes the Python repr for this marker.
+    ///
+    /// System markers have special repr formats ("<stdout>", "<stderr>").
+    /// `typing.Union` uses `<class 'typing.Union'>` format (matching CPython).
+    /// Other typing markers are prefixed with "typing." (e.g., "typing.Any").
+    fn py_repr_fmt(self, f: &mut impl Write) -> fmt::Result {
+        let s: &'static str = self.0.into();
+        match self.0 {
+            StaticStrings::Stdout => f.write_str("<stdout>")?,
+            StaticStrings::Stderr => f.write_str("<stderr>")?,
+            StaticStrings::UnionType => f.write_str("<class 'typing.Union'>")?,
+            _ => write!(f, "typing.{s}")?,
+        }
+        Ok(())
+    }
+}
+
 /// High-bit tag reserved for literal singletons (None, Ellipsis, booleans).
 const SINGLETON_ID_TAG: usize = 1usize << (usize::BITS - 1);
 /// High-bit tag reserved for interned string `id()` values.
@@ -1950,6 +2065,8 @@ const BUILTIN_ID_TAG: usize = 1usize << (usize::BITS - 7);
 const FUNCTION_ID_TAG: usize = 1usize << (usize::BITS - 8);
 /// High-bit tag for External Function value-based IDs.
 const EXTFUNCTION_ID_TAG: usize = 1usize << (usize::BITS - 9);
+/// High-bit tag for Marker value-based IDs (stdout, stderr, etc.).
+const MARKER_ID_TAG: usize = 1usize << (usize::BITS - 10);
 
 /// Masks for value-based ID tags (keep bits below the tag bit).
 const INT_ID_MASK: usize = INT_ID_TAG - 1;
@@ -1957,6 +2074,7 @@ const FLOAT_ID_MASK: usize = FLOAT_ID_TAG - 1;
 const BUILTIN_ID_MASK: usize = BUILTIN_ID_TAG - 1;
 const FUNCTION_ID_MASK: usize = FUNCTION_ID_TAG - 1;
 const EXTFUNCTION_ID_MASK: usize = EXTFUNCTION_ID_TAG - 1;
+const MARKER_ID_MASK: usize = MARKER_ID_TAG - 1;
 
 /// Enumerates singleton literal slots so we can issue stable `id()` values without heap allocation.
 #[repr(usize)]
@@ -2034,6 +2152,12 @@ fn function_value_id(f_id: FunctionId) -> usize {
 #[inline]
 fn ext_function_value_id(f_id: ExtFunctionId) -> usize {
     EXTFUNCTION_ID_TAG | (f_id.index() & EXTFUNCTION_ID_MASK)
+}
+
+/// Computes a deterministic ID for a marker value based on its discriminant.
+#[inline]
+fn marker_value_id(m: Marker) -> usize {
+    MARKER_ID_TAG | ((m.0 as usize) & MARKER_ID_MASK)
 }
 
 /// Converts an i64 repeat count to usize, handling negative values and overflow.

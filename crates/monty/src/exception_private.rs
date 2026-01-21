@@ -74,6 +74,12 @@ pub enum ExcType {
     /// Subclass of ValueError - for encoding/decoding errors.
     UnicodeDecodeError,
 
+    // --- ImportError hierarchy ---
+    /// Import-related errors (module not found, name not in module).
+    ImportError,
+    /// Subclass of ImportError - for when a module cannot be found.
+    ModuleNotFoundError,
+
     // --- Standalone exception types ---
     AssertionError,
     MemoryError,
@@ -114,6 +120,8 @@ impl ExcType {
             Self::NameError => matches!(self, Self::UnboundLocalError),
             // ValueError catches UnicodeDecodeError
             Self::ValueError => matches!(self, Self::UnicodeDecodeError),
+            // ImportError catches ModuleNotFoundError
+            Self::ImportError => matches!(self, Self::ModuleNotFoundError),
             // All other types only match exactly (handled by self == handler_type above)
             _ => false,
         }
@@ -225,6 +233,23 @@ impl ExcType {
             format!("'{type_}' object has no attribute '{attr_name}' and no __dict__ for setting new attributes"),
         )
         .into()
+    }
+
+    /// Creates an AttributeError for a missing module attribute.
+    ///
+    /// Matches CPython's format: `AttributeError: module 'name' has no attribute 'attr'`
+    /// Sets `hide_caret: true` because CPython doesn't show carets for attribute GET errors.
+    #[must_use]
+    pub(crate) fn attribute_error_module(module_name: &str, attr_name: &str) -> RunError {
+        let exc = SimpleException::new_msg(
+            Self::AttributeError,
+            format!("module '{module_name}' has no attribute '{attr_name}'"),
+        );
+        RunError::Exc(ExceptionRaise {
+            exc,
+            frame: None,
+            hide_caret: true, // CPython doesn't show carets for attribute GET errors
+        })
     }
 
     /// Creates a FrozenInstanceError for assigning to a frozen dataclass.
@@ -752,6 +777,25 @@ impl ExcType {
     #[must_use]
     pub(crate) fn overflow_repeat_count() -> SimpleException {
         SimpleException::new_msg(Self::OverflowError, "cannot fit 'int' into an index-sized integer")
+    }
+
+    /// Creates an ImportError for when a name cannot be imported from a module.
+    ///
+    /// Matches CPython's format for built-in modules:
+    /// `ImportError: cannot import name 'name' from 'module' (unknown location)`
+    ///
+    /// Sets `hide_caret: true` because CPython doesn't show carets for import errors.
+    #[must_use]
+    pub(crate) fn cannot_import_name(name: &str, module_name: &str) -> RunError {
+        let exc = SimpleException::new_msg(
+            Self::ImportError,
+            format!("cannot import name '{name}' from '{module_name}' (unknown location)"),
+        );
+        RunError::Exc(ExceptionRaise {
+            exc,
+            frame: None,
+            hide_caret: true,
+        })
     }
 
     /// Creates a ValueError for negative shift count in bitwise shift operations.

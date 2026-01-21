@@ -297,7 +297,7 @@ impl MontyObject {
                     // Cycle detected - return appropriate placeholder
                     return match heap.get(*id) {
                         HeapData::List(_) => Self::Cycle(*id, "[...]".to_owned()),
-                        HeapData::Tuple(_) => Self::Cycle(*id, "(...)".to_owned()),
+                        HeapData::Tuple(_) | HeapData::NamedTuple(_) => Self::Cycle(*id, "(...)".to_owned()),
                         HeapData::Dict(_) => Self::Cycle(*id, "{...}".to_owned()),
                         _ => Self::Cycle(*id, "...".to_owned()),
                     };
@@ -322,6 +322,16 @@ impl MontyObject {
                             .map(|obj| Self::from_value_inner(obj, heap, visited, interns))
                             .collect(),
                     ),
+                    HeapData::NamedTuple(nt) => {
+                        // Convert NamedTuple to Tuple for now (MontyObject doesn't have a NamedTuple variant)
+                        // This preserves the tuple-like data while losing the named fields
+                        Self::Tuple(
+                            nt.as_vec()
+                                .iter()
+                                .map(|obj| Self::from_value_inner(obj, heap, visited, interns))
+                                .collect(),
+                        )
+                    }
                     HeapData::Dict(dict) => Self::Dict(DictPairs(
                         dict.into_iter()
                             .map(|(k, v)| {
@@ -393,6 +403,10 @@ impl MontyObject {
                         Self::Repr("<iterator>".to_owned())
                     }
                     HeapData::LongInt(li) => Self::BigInt(li.inner().clone()),
+                    HeapData::Module(m) => {
+                        // Modules are represented as a repr string
+                        Self::Repr(format!("<module '{}'>", interns.get_str(m.name())))
+                    }
                 };
 
                 // Remove from visited set after processing

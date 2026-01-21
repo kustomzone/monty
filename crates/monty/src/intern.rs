@@ -17,7 +17,7 @@ use std::{str::FromStr, sync::LazyLock};
 use ahash::AHashMap;
 use strum::{EnumString, FromRepr, IntoStaticStr};
 
-use crate::function::Function;
+use crate::{function::Function, value::Value};
 
 /// Index into the string interner's storage.
 ///
@@ -68,10 +68,10 @@ static ASCII_STRS: LazyLock<[&'static str; 128]> = LazyLock::new(|| {
 });
 
 /// Static string values which are known at compile time and don't need to be interned.
-///
-/// StringIds are derived from `StaticStrings::Module as u8`.
 #[repr(u8)]
-#[derive(Clone, Copy, FromRepr, EnumString, IntoStaticStr)]
+#[derive(
+    Debug, Clone, Copy, FromRepr, EnumString, IntoStaticStr, PartialEq, Eq, Hash, serde::Serialize, serde::Deserialize,
+)]
 #[strum(serialize_all = "snake_case")]
 pub enum StaticStrings {
     #[strum(serialize = "")]
@@ -186,15 +186,99 @@ pub enum StaticStrings {
     Decode,
     Hex,
     Fromhex,
+
+    // ==========================
+    // sys module strings
+    #[strum(serialize = "sys")]
+    Sys,
+    #[strum(serialize = "sys.version_info")]
+    SysVersionInfo,
+    #[strum(serialize = "version")]
+    Version,
+    #[strum(serialize = "version_info")]
+    VersionInfo,
+    #[strum(serialize = "platform")]
+    Platform,
+    #[strum(serialize = "stdout")]
+    Stdout,
+    #[strum(serialize = "stderr")]
+    Stderr,
+    #[strum(serialize = "major")]
+    Major,
+    #[strum(serialize = "minor")]
+    Minor,
+    #[strum(serialize = "micro")]
+    Micro,
+    #[strum(serialize = "releaselevel")]
+    Releaselevel,
+    #[strum(serialize = "serial")]
+    Serial,
+    #[strum(serialize = "final")]
+    Final,
+    #[strum(serialize = "3.14.0 (Monty)")]
+    MontyVersionString,
+    #[strum(serialize = "monty")]
+    Monty,
+
+    // ==========================
+    // typing module strings
+    #[strum(serialize = "typing")]
+    Typing,
+    #[strum(serialize = "TYPE_CHECKING")]
+    TypeChecking,
+    #[strum(serialize = "Any")]
+    Any,
+    #[strum(serialize = "Optional")]
+    Optional,
+    #[strum(serialize = "Union")]
+    UnionType,
+    #[strum(serialize = "List")]
+    ListType,
+    #[strum(serialize = "Dict")]
+    DictType,
+    #[strum(serialize = "Tuple")]
+    TupleType,
+    #[strum(serialize = "Set")]
+    SetType,
+    #[strum(serialize = "FrozenSet")]
+    FrozenSet,
+    #[strum(serialize = "Callable")]
+    Callable,
+    #[strum(serialize = "Type")]
+    Type,
+    #[strum(serialize = "Sequence")]
+    Sequence,
+    #[strum(serialize = "Mapping")]
+    Mapping,
+    #[strum(serialize = "Iterable")]
+    Iterable,
+    #[strum(serialize = "Iterator")]
+    IteratorType,
+    #[strum(serialize = "Generator")]
+    Generator,
+    #[strum(serialize = "ClassVar")]
+    ClassVar,
+    #[strum(serialize = "Final")]
+    FinalType,
+    #[strum(serialize = "Literal")]
+    Literal,
+    #[strum(serialize = "TypeVar")]
+    TypeVar,
+    #[strum(serialize = "Generic")]
+    Generic,
+    #[strum(serialize = "Protocol")]
+    Protocol,
+    #[strum(serialize = "Annotated")]
+    Annotated,
+    #[strum(serialize = "Self")]
+    SelfType,
+    #[strum(serialize = "Never")]
+    Never,
+    #[strum(serialize = "NoReturn")]
+    NoReturn,
 }
 
 impl StaticStrings {
-    /// Converts this static string variant to its corresponding `StringId`.
-    pub fn as_string_id(self) -> StringId {
-        let string_id = self as u32;
-        StringId(string_id + STATIC_STRING_ID_OFFSET)
-    }
-
     /// Attempts to convert a `StringId` back to a `StaticStrings` variant.
     ///
     /// Returns `None` if the `StringId` doesn't correspond to a static string
@@ -205,15 +289,29 @@ impl StaticStrings {
     }
 }
 
+/// Converts this static string variant to its corresponding `StringId`.
+impl From<StaticStrings> for StringId {
+    fn from(value: StaticStrings) -> Self {
+        let string_id = value as u32;
+        Self(string_id + STATIC_STRING_ID_OFFSET)
+    }
+}
+
+impl From<StaticStrings> for Value {
+    fn from(value: StaticStrings) -> Self {
+        Self::InternString(value.into())
+    }
+}
+
 impl PartialEq<StaticStrings> for StringId {
     fn eq(&self, other: &StaticStrings) -> bool {
-        *self == other.as_string_id()
+        *self == Self::from(*other)
     }
 }
 
 impl PartialEq<StringId> for StaticStrings {
     fn eq(&self, other: &StringId) -> bool {
-        self.as_string_id() == *other
+        StringId::from(*self) == *other
     }
 }
 
@@ -325,7 +423,7 @@ impl InternerBuilder {
         if s.len() == 1 {
             StringId::from_ascii(s.as_bytes()[0])
         } else if let Ok(ss) = StaticStrings::from_str(s) {
-            ss.as_string_id()
+            ss.into()
         } else {
             *self.string_map.entry(s.to_owned()).or_insert_with(|| {
                 let string_id = self.strings.len() + INTERN_STRING_ID_OFFSET;
