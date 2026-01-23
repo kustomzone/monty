@@ -46,13 +46,8 @@ fn builtin_min_max(
 
     // Check for unsupported kwargs (key, default not yet implemented)
     if !kwargs.is_empty() {
-        for (k, v) in kwargs {
-            k.drop_with_heap(heap);
-            v.drop_with_heap(heap);
-        }
-        for v in positional {
-            v.drop_with_heap(heap);
-        }
+        kwargs.drop_with_heap(heap);
+        positional.drop_with_heap(heap);
         return Err(SimpleException::new_msg(
             ExcType::TypeError,
             format!("{func_name}() does not support keyword arguments yet"),

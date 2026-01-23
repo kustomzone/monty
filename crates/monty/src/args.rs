@@ -155,9 +155,7 @@ impl ArgValues {
         // Check no positional arguments
         let mut pos_iter = pos;
         if pos_iter.next().is_some() {
-            for v in pos_iter {
-                v.drop_with_heap(heap);
-            }
+            pos_iter.drop_with_heap(heap);
             kwargs.drop_with_heap(heap);
             return Err(ExcType::type_error_no_args(method_name, 1));
         }
@@ -327,6 +325,18 @@ impl Iterator for ArgPosIter {
 }
 
 impl ExactSizeIterator for ArgPosIter {}
+
+impl ArgPosIter {
+    /// Drops all remaining values in the iterator, decrementing reference counts
+    ///
+    /// This should be called when discarding a partially-consumed iterator to ensure
+    /// proper cleanup of any remaining `Value::Ref` variants
+    pub fn drop_with_heap(self, heap: &mut Heap<impl ResourceTracker>) {
+        for v in self {
+            v.drop_with_heap(heap);
+        }
+    }
+}
 
 /// Type for keyword arguments.
 ///

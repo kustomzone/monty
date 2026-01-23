@@ -21,13 +21,8 @@ pub fn builtin_sorted(heap: &mut Heap<impl ResourceTracker>, args: ArgValues, in
 
     // Check for unsupported kwargs
     if !kwargs.is_empty() {
-        for (k, v) in kwargs {
-            k.drop_with_heap(heap);
-            v.drop_with_heap(heap);
-        }
-        for v in positional {
-            v.drop_with_heap(heap);
-        }
+        kwargs.drop_with_heap(heap);
+        positional.drop_with_heap(heap);
         return Err(
             SimpleException::new_msg(ExcType::TypeError, "sorted() does not support keyword arguments yet").into(),
         );
@@ -35,9 +30,7 @@ pub fn builtin_sorted(heap: &mut Heap<impl ResourceTracker>, args: ArgValues, in
 
     let positional_len = positional.len();
     if positional_len != 1 {
-        for v in positional {
-            v.drop_with_heap(heap);
-        }
+        positional.drop_with_heap(heap);
         return Err(SimpleException::new_msg(
             ExcType::TypeError,
             format!("sorted expected 1 argument, got {positional_len}"),

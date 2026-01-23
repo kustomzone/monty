@@ -20,13 +20,8 @@ pub fn builtin_pow(heap: &mut Heap<impl ResourceTracker>, args: ArgValues) -> Ru
     // pow() accepts 2 or 3 arguments
     let (mut positional, kwargs) = args.into_parts();
     if !kwargs.is_empty() {
-        for (k, v) in kwargs {
-            k.drop_with_heap(heap);
-            v.drop_with_heap(heap);
-        }
-        for v in positional {
-            v.drop_with_heap(heap);
-        }
+        kwargs.drop_with_heap(heap);
+        positional.drop_with_heap(heap);
         return Err(SimpleException::new_msg(ExcType::TypeError, "pow() takes no keyword arguments").into());
     }
 
@@ -38,9 +33,7 @@ pub fn builtin_pow(heap: &mut Heap<impl ResourceTracker>, args: ArgValues) -> Ru
             Some(positional.next().unwrap()),
         ),
         n => {
-            for v in positional {
-                v.drop_with_heap(heap);
-            }
+            positional.drop_with_heap(heap);
             return Err(SimpleException::new_msg(
                 ExcType::TypeError,
                 format!("pow expected 2 or 3 arguments, got {n}"),
