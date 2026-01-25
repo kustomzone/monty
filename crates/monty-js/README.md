@@ -13,7 +13,7 @@ npm install @pydantic/monty
 ```js
 const monty = require('@pydantic/monty')
 
-const { output, result } = monty.run('print("hello")\n1 + 2')
+const { output, result } = pydantic_monty.run('print("hello")\n1 + 2')
 console.log(output) // "hello\n"
 console.log(result) // debug representation of the final value
 ```
@@ -23,7 +23,7 @@ console.log(result) // debug representation of the final value
 ```ts
 import monty from '@pydantic/monty'
 
-const res = monty.run('print("hi")\n3 * 7')
+const res = pydantic_monty.run('print("hi")\n3 * 7')
 console.log(res.output)
 console.log(res.result)
 ```

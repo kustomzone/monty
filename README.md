@@ -17,7 +17,7 @@ The goal is to provide:
 ### Python
 
 ```python
-import monty
+import pydantic_monty
 
 code = """
 def fib(n):
@@ -28,7 +28,7 @@ def fib(n):
 fib(x)
 """
 
-m = monty.Monty(code, inputs=['x'], script_name='fib.py')
+m = pydantic_monty.Monty(code, inputs=['x'], script_name='fib.py')
 print(m.run(inputs={'x': 10}))
 #> 55
 ```
@@ -39,20 +39,20 @@ Use `start()` and `resume()` to handle external function calls iteratively,
 giving you control over each call:
 
 ```python
-import monty
+import pydantic_monty
 
 code = """
 data = fetch(url)
 len(data)
 """
 
-m = monty.Monty(code, inputs=['url'], external_functions=['fetch'])
+m = pydantic_monty.Monty(code, inputs=['url'], external_functions=['fetch'])
 
 # Start execution - pauses when fetch() is called
 result = m.start(inputs={'url': 'https://example.com'})
 
 print(type(result))
-#> <class 'monty.MontySnapshot'>
+#> <class 'pydantic_monty.MontySnapshot'>
 print(result.function_name)  # fetch
 #> fetch
 print(result.args)
@@ -62,7 +62,7 @@ print(result.args)
 result = result.resume(return_value='hello world')
 
 print(type(result))
-#> <class 'monty.MontyComplete'>
+#> <class 'pydantic_monty.MontyComplete'>
 print(result.output)
 #> 11
 ```
@@ -73,24 +73,24 @@ Both `Monty` and `MontySnapshot` can be serialized to bytes and restored later.
 This allows caching parsed code or suspending execution across process boundaries:
 
 ```python
-import monty
+import pydantic_monty
 
 # Serialize parsed code to avoid re-parsing
-m = monty.Monty('x + 1', inputs=['x'])
+m = pydantic_monty.Monty('x + 1', inputs=['x'])
 data = m.dump()
 
 # Later, restore and run
-m2 = monty.Monty.load(data)
+m2 = pydantic_monty.Monty.load(data)
 print(m2.run(inputs={'x': 41}))
 #> 42
 
 # Serialize execution state mid-flight
-m = monty.Monty('fetch(url)', inputs=['url'], external_functions=['fetch'])
+m = pydantic_monty.Monty('fetch(url)', inputs=['url'], external_functions=['fetch'])
 progress = m.start(inputs={'url': 'https://example.com'})
 state = progress.dump()
 
 # Later, restore and resume (e.g., in a different process)
-progress2 = monty.MontySnapshot.load(state)
+progress2 = pydantic_monty.MontySnapshot.load(state)
 result = progress2.resume(return_value='response data')
 print(result.output)
 #> response data

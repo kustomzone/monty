@@ -18,7 +18,7 @@ use pyo3::prelude::*;
 
 /// Monty - A sandboxed Python interpreter written in Rust.
 #[pymodule]
-mod monty {
+mod pydantic_monty {
     use pyo3::prelude::*;
 
     #[pymodule_export]
