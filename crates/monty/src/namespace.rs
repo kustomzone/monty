@@ -5,7 +5,7 @@ use crate::{
     heap::{Heap, HeapId},
     parse::CodeRange,
     resource::{ResourceError, ResourceTracker},
-    value::{DropWithHeap, Value},
+    value::Value,
 };
 
 /// Unique identifier for values stored inside the namespace.

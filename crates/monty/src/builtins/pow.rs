@@ -9,7 +9,7 @@ use crate::{
     heap::{Heap, HeapData},
     resource::{LARGE_RESULT_THRESHOLD, ResourceTracker},
     types::{LongInt, PyTrait},
-    value::{DropWithHeap, Value},
+    value::Value,
 };
 
 /// Implementation of the pow() builtin function.

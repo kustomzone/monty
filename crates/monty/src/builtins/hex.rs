@@ -9,7 +9,7 @@ use crate::{
     heap::{Heap, HeapData},
     resource::ResourceTracker,
     types::{PyTrait, Str},
-    value::{DropWithHeap, Value},
+    value::Value,
 };
 
 /// Implementation of the hex() builtin function.

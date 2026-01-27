@@ -77,7 +77,7 @@ use crate::{
     intern::{Interns, StaticStrings, StringId},
     resource::ResourceTracker,
     types::List,
-    value::{Attr, DropWithHeap, Value},
+    value::{Attr, Value},
 };
 
 // =============================================================================

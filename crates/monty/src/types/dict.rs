@@ -11,7 +11,7 @@ use crate::{
     intern::{Interns, StaticStrings},
     resource::ResourceTracker,
     types::Type,
-    value::{Attr, DropWithHeap, Value},
+    value::{Attr, Value},
 };
 
 /// Python dict type preserving insertion order.

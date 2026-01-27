@@ -7,7 +7,7 @@ use crate::{
     intern::Interns,
     resource::ResourceTracker,
     types::PyTrait,
-    value::{DropWithHeap, Value},
+    value::Value,
 };
 
 /// Implementation of the hash() builtin function.

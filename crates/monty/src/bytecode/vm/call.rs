@@ -20,7 +20,7 @@ use crate::{
         list::do_list_sort,
         str::call_str_method,
     },
-    value::{Attr, DropWithHeap, Value},
+    value::{Attr, Value},
 };
 
 /// Result of executing a call opcode.

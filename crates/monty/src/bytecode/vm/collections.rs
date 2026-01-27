@@ -8,7 +8,7 @@ use crate::{
     io::PrintWriter,
     resource::ResourceTracker,
     types::{Dict, List, PyTrait, Set, Slice, Tuple, Type, slice::value_to_option_i64, str::allocate_char},
-    value::{DropWithHeap, Value},
+    value::Value,
 };
 
 impl<T: ResourceTracker, P: PrintWriter> VM<'_, T, P> {

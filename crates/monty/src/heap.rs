@@ -18,7 +18,7 @@ use crate::{
         Bytes, Dataclass, Dict, FrozenSet, List, LongInt, Module, MontyIter, NamedTuple, PyTrait, Range, Set, Slice,
         Str, Tuple, Type,
     },
-    value::{Attr, DropWithHeap, Value},
+    value::{Attr, Value},
 };
 
 /// Unique identifier for values stored inside the heap arena.

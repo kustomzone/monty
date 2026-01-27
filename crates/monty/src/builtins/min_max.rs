@@ -9,7 +9,7 @@ use crate::{
     intern::Interns,
     resource::ResourceTracker,
     types::{MontyIter, PyTrait},
-    value::{DropWithHeap, Value},
+    value::Value,
 };
 
 /// Implementation of the min() builtin function.

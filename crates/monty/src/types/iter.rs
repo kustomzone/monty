@@ -37,7 +37,7 @@ use crate::{
     intern::{BytesId, Interns, StringId},
     resource::ResourceTracker,
     types::{PyTrait, Range, str::allocate_char},
-    value::{DropWithHeap, Value},
+    value::Value,
 };
 
 /// Iterator state for Python for loops.
@@ -112,6 +112,11 @@ impl MontyIter {
             value.drop_with_heap(heap);
             Err(err)
         }
+    }
+
+    /// Drops the iterator and its held value properly.
+    pub fn drop_with_heap(self, heap: &mut Heap<impl ResourceTracker>) {
+        self.value.drop_with_heap(heap);
     }
 
     /// Collects HeapIds from this iterator for reference counting cleanup.
@@ -364,12 +369,6 @@ impl MontyIter {
             items.push(item);
         }
         Ok(items)
-    }
-}
-
-impl DropWithHeap for MontyIter {
-    fn drop_with_heap<R: ResourceTracker>(self, heap: &mut Heap<R>) {
-        self.value.drop_with_heap(heap);
     }
 }
 

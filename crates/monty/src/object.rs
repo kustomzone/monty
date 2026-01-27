@@ -23,7 +23,7 @@ use crate::{
         str::{Str, StringRepr, string_repr_fmt},
         tuple::Tuple,
     },
-    value::{DropWithHeap, Value},
+    value::Value,
 };
 
 /// A Python value that can be passed to or returned from the interpreter.

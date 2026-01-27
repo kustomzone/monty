@@ -19,7 +19,7 @@ use crate::{
     heap::{Heap, HeapId},
     intern::Interns,
     resource::ResourceTracker,
-    value::{Attr, DropWithHeap, Value},
+    value::{Attr, Value},
 };
 
 /// Common operations for heap-allocated Python values.

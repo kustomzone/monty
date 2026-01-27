@@ -1,8 +1,6 @@
 //! Public interface for running Monty code.
 use std::sync::atomic::{AtomicUsize, Ordering};
 
-#[cfg(feature = "ref-count-return")]
-use crate::value::DropWithHeap;
 use crate::{
     ExcType, MontyException,
     bytecode::{Code, Compiler, FrameExit, VM, VMSnapshot},

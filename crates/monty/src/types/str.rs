@@ -15,7 +15,7 @@ use crate::{
     intern::{Interns, StaticStrings, StringId},
     resource::{ResourceError, ResourceTracker},
     types::Type,
-    value::{Attr, DropWithHeap, Value},
+    value::{Attr, Value},
 };
 
 /// Python string value stored on the heap.

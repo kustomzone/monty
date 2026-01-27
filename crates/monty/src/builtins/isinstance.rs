@@ -7,7 +7,7 @@ use crate::{
     heap::{Heap, HeapData},
     resource::ResourceTracker,
     types::{PyTrait, Type},
-    value::{DropWithHeap, Value},
+    value::Value,
 };
 
 /// Implementation of the isinstance() builtin function.

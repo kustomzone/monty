@@ -12,7 +12,7 @@ use crate::{
     intern::{Interns, StringId},
     resource::ResourceTracker,
     types::{Dict, Tuple},
-    value::{DropWithHeap, Value},
+    value::Value,
 };
 
 /// Represents a Python function signature with all parameter types.

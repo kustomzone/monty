@@ -14,7 +14,7 @@ use crate::{
     intern::Interns,
     resource::ResourceTracker,
     types::{PyTrait, Type},
-    value::{DropWithHeap, Value},
+    value::Value,
 };
 
 /// Python range object representing an immutable sequence of integers.

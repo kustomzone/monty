@@ -12,7 +12,7 @@ use crate::{
     io::PrintWriter,
     resource::{ResourceError, ResourceTracker},
     types::Type,
-    value::{Attr, DropWithHeap, Value},
+    value::{Attr, Value},
 };
 
 /// Python list type, wrapping a Vec of Values.

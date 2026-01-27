@@ -26,18 +26,6 @@ use crate::{
     },
 };
 
-/// Trait for types that hold `Value` references and need proper cleanup.
-///
-/// Types that contain `Value::Ref` variants must implement this trait to ensure
-/// reference counts are properly decremented when values are discarded.
-pub trait DropWithHeap {
-    /// Drops all contained values, decrementing reference counts for heap-allocated values.
-    ///
-    /// This method consumes `self` and ensures all `Value::Ref` variants have their
-    /// reference counts properly managed.
-    fn drop_with_heap<R: ResourceTracker>(self, heap: &mut Heap<R>);
-}
-
 /// Primary value type representing Python objects at runtime.
 ///
 /// This enum uses a hybrid design: small immediate values (Int, Bool, None) are stored
@@ -1897,6 +1885,34 @@ impl Value {
         }
     }
 
+    /// Drops an value, decrementing its heap reference count if applicable.
+    ///
+    /// For immediate values, this is a no-op. For heap-allocated values (Ref variant),
+    /// this decrements the reference count and frees the value (and any children) when
+    /// the count reaches zero. For Closure variants, this decrements ref counts on all
+    /// captured cells.
+    ///
+    /// # Important
+    /// This method MUST be called before overwriting a namespace slot or discarding
+    /// a value to prevent memory leaks.
+    #[cfg(not(feature = "ref-count-panic"))]
+    pub fn drop_with_heap(self, heap: &mut Heap<impl ResourceTracker>) {
+        if let Self::Ref(id) = self {
+            heap.dec_ref(id);
+        }
+    }
+    /// With `ref-count-panic` enabled, `Ref` variants are replaced with `Dereferenced` and
+    /// the original is forgotten to prevent the Drop impl from panicking. Non-Ref variants
+    /// are left unchanged since they don't trigger the Drop panic.
+    #[cfg(feature = "ref-count-panic")]
+    pub fn drop_with_heap(mut self, heap: &mut Heap<impl ResourceTracker>) {
+        let old = std::mem::replace(&mut self, Self::Dereferenced);
+        if let Self::Ref(id) = &old {
+            heap.dec_ref(*id);
+            std::mem::forget(old);
+        }
+    }
+
     /// Internal helper for copying immediate values without heap interaction.
     ///
     /// This method should only be called by `clone_with_heap()` for immediate values.
@@ -1962,37 +1978,6 @@ impl Value {
                 _ => None,
             },
             _ => None,
-        }
-    }
-}
-
-impl DropWithHeap for Value {
-    /// Drops an value, decrementing its heap reference count if applicable.
-    ///
-    /// For immediate values, this is a no-op. For heap-allocated values (Ref variant),
-    /// this decrements the reference count and frees the value (and any children) when
-    /// the count reaches zero. For Closure variants, this decrements ref counts on all
-    /// captured cells.
-    ///
-    /// # Important
-    /// This method MUST be called before overwriting a namespace slot or discarding
-    /// a value to prevent memory leaks.
-    #[cfg(not(feature = "ref-count-panic"))]
-    fn drop_with_heap<R: ResourceTracker>(self, heap: &mut Heap<R>) {
-        if let Self::Ref(id) = self {
-            heap.dec_ref(id);
-        }
-    }
-
-    /// With `ref-count-panic` enabled, `Ref` variants are replaced with `Dereferenced` and
-    /// the original is forgotten to prevent the Drop impl from panicking. Non-Ref variants
-    /// are left unchanged since they don't trigger the Drop panic.
-    #[cfg(feature = "ref-count-panic")]
-    fn drop_with_heap<R: ResourceTracker>(mut self, heap: &mut Heap<R>) {
-        let old = std::mem::replace(&mut self, Self::Dereferenced);
-        if let Self::Ref(id) = &old {
-            heap.dec_ref(*id);
-            std::mem::forget(old);
         }
     }
 }
