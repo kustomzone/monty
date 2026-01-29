@@ -91,9 +91,8 @@ jobs:
       - run: cargo llvm-cov --no-report -p monty_type_checking -p monty_typeshed
       # Generating text report:
       - run: cargo llvm-cov report --ignore-filename-regex '(tests/|test_cases/|/tests\.rs$$)'
-      - run: |
-          source <(cargo llvm-cov show-env --export-prefix)
-          cargo llvm-cov --codecov --output-path=codecov.json --ignore-filename-regex '(tests/|test_cases/|/tests\.rs$$)'
+      # Generate codecov report (use `report` subcommand to avoid recompilation)
+      - run: cargo llvm-cov report --codecov --output-path=codecov.json --ignore-filename-regex '(tests/|test_cases/|/tests\.rs$$)'
 
       - uses: codecov/codecov-action@v5
         with:
