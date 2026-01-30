@@ -336,7 +336,7 @@ pub enum Literal {
     Ellipsis,
     None,
     Bool(bool),
-    Int(i64),
+    Int(i32),
     Float(f64),
     /// An interned string literal. The StringId references the string in the Interns table.
     Str(StringId),
@@ -354,13 +354,18 @@ impl From<Literal> for Value {
     ///
     /// This is the only place parse-time data crosses the boundary into runtime
     /// semantics, ensuring every literal follows the same conversion path.
+    ///
+    /// # Panics
+    ///
+    /// Panics if called with `Literal::Float` - float literals are heap-allocated
+    /// and must use `LoadFloat` bytecode instead of the const pool.
     fn from(literal: Literal) -> Self {
         match literal {
             Literal::Ellipsis => Self::Ellipsis,
             Literal::None => Self::None,
             Literal::Bool(b) => Self::Bool(b),
             Literal::Int(v) => Self::Int(v),
-            Literal::Float(v) => Self::Float(v),
+            Literal::Float(_) => panic!("Float literals must use LoadFloat opcode, not const pool"),
             Literal::Str(string_id) => Self::InternString(string_id),
             Literal::Bytes(bytes_id) => Self::InternBytes(bytes_id),
             Literal::LongInt(long_int_id) => Self::InternLongInt(long_int_id),

@@ -26,5 +26,5 @@ pub fn builtin_id(heap: &mut Heap<impl ResourceTracker>, args: ArgValues) -> Run
         reason = "Python id() returns signed; wrapping intentional"
     )]
     let id_i64 = id as i64;
-    Ok(Value::Int(id_i64))
+    Ok(crate::value::int_value(id_i64, heap)?)
 }

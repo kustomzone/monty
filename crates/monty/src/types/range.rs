@@ -246,7 +246,7 @@ impl PyTrait for Range {
 
         // Extract integer index, accepting both Int and Bool (True=1, False=0)
         let index = match key {
-            Value::Int(i) => *i,
+            Value::Int(i) => i64::from(*i),
             Value::Bool(b) => i64::from(*b),
             _ => return Err(ExcType::type_error_indices(Type::Range, key.py_type(heap))),
         };
@@ -266,7 +266,8 @@ impl PyTrait for Range {
             .checked_mul(self.step)
             .and_then(|v| self.start.checked_add(v))
             .expect("range element calculation overflowed");
-        Ok(Value::Int(offset))
+        // Range elements can exceed i32, use int_value
+        Ok(crate::value::int_value(offset, heap)?)
     }
 
     fn py_eq(&self, other: &Self, _heap: &mut Heap<impl ResourceTracker>, _interns: &Interns) -> bool {

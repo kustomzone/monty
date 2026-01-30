@@ -92,7 +92,7 @@ impl<T: ResourceTracker, P: PrintWriter> VM<'_, T, P> {
 
         // Try fast path for Int/Float types
         let mod_result = match k {
-            Value::Int(k_val) => lhs.py_mod_eq(&rhs, *k_val),
+            Value::Int(k_val) => lhs.py_mod_eq(&rhs, i64::from(*k_val), self.heap),
             _ => None,
         };
 

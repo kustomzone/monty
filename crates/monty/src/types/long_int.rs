@@ -42,14 +42,14 @@ impl LongInt {
         Self(bi)
     }
 
-    /// Converts to a `Value`, demoting to i64 if it fits.
+    /// Converts to a `Value`, demoting to i32 if it fits.
     ///
-    /// For performance, we want to keep values as `Value::Int(i64)` whenever possible.
-    /// This method checks if the value fits in an i64 and returns `Value::Int` if so,
+    /// For performance, we want to keep values as `Value::Int(i32)` whenever possible.
+    /// This method checks if the value fits in an i32 and returns `Value::Int` if so,
     /// otherwise allocates a `HeapData::LongInt` on the heap.
     pub fn into_value(self, heap: &mut Heap<impl ResourceTracker>) -> Result<Value, ResourceError> {
-        // Try to demote back to i64 for performance
-        if let Some(i) = self.0.to_i64() {
+        // Try to demote back to i32 for performance
+        if let Some(i) = self.0.to_i32() {
             Ok(Value::Int(i))
         } else {
             let heap_id = heap.allocate(HeapData::LongInt(self))?;
@@ -57,16 +57,16 @@ impl LongInt {
         }
     }
 
-    /// Computes a hash consistent with i64 hashing.
+    /// Computes a hash consistent with i32 hashing.
     ///
-    /// Critical: For values that fit in i64, this must return the same hash as
-    /// hashing the i64 directly. This ensures dict key consistency - e.g.,
+    /// Critical: For values that fit in i32, this must return the same hash as
+    /// hashing the i32 directly. This ensures dict key consistency - e.g.,
     /// `hash(5)` must equal `hash(LongInt(5))`.
     pub fn hash(&self) -> u64 {
-        // If the LongInt fits in i64, hash as i64 for consistency
-        if let Some(i) = self.0.to_i64() {
+        // If the LongInt fits in i32, hash as i32 for consistency
+        if let Some(i) = self.0.to_i32() {
             let mut hasher = DefaultHasher::new();
-            // Hash the i64 discriminant and value to match Value::Int hashing
+            // Hash the i32 discriminant and value to match Value::Int hashing
             std::mem::discriminant(&Value::Int(0)).hash(&mut hasher);
             i.hash(&mut hasher);
             hasher.finish()

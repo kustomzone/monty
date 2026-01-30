@@ -27,13 +27,16 @@ pub fn builtin_divmod(heap: &mut Heap<impl ResourceTracker>, args: ArgValues) ->
                 Err(ExcType::divmod_by_zero())
             } else {
                 // Python uses floor division (toward negative infinity), not Euclidean
-                let (quot, rem) = floor_divmod(*x, *y);
-                let tuple_id = heap.allocate(HeapData::Tuple(Tuple::new(vec![Value::Int(quot), Value::Int(rem)])))?;
+                let (quot, rem) = floor_divmod(i64::from(*x), i64::from(*y));
+                let quot_val = crate::value::int_value(quot, heap)?;
+                let rem_val = crate::value::int_value(rem, heap)?;
+                let tuple_id = heap.allocate(HeapData::Tuple(Tuple::new(vec![quot_val, rem_val])))?;
                 Ok(Value::Ref(tuple_id))
             }
         }
-        (Value::Int(x), Value::Ref(id)) => {
-            if let HeapData::LongInt(li) = heap.get(*id) {
+        // Int / LongInt or Int / Float
+        (Value::Int(x), Value::Ref(id)) => match heap.get(*id) {
+            HeapData::LongInt(li) => {
                 if li.is_zero() {
                     Err(ExcType::divmod_by_zero())
                 } else {
@@ -44,7 +47,21 @@ pub fn builtin_divmod(heap: &mut Heap<impl ResourceTracker>, args: ArgValues) ->
                     let tuple_id = heap.allocate(HeapData::Tuple(Tuple::new(vec![quot_val, rem_val])))?;
                     Ok(Value::Ref(tuple_id))
                 }
-            } else {
+            }
+            HeapData::Float(y) => {
+                if *y == 0.0 {
+                    Err(ExcType::divmod_by_zero())
+                } else {
+                    let xf = f64::from(*x);
+                    let quot = (xf / y).floor();
+                    let rem = xf - quot * y;
+                    let quot_val = Value::Ref(heap.allocate(HeapData::Float(quot))?);
+                    let rem_val = Value::Ref(heap.allocate(HeapData::Float(rem))?);
+                    let tuple_id = heap.allocate(HeapData::Tuple(Tuple::new(vec![quot_val, rem_val])))?;
+                    Ok(Value::Ref(tuple_id))
+                }
+            }
+            _ => {
                 let a_type = a.py_type(heap);
                 let b_type = b.py_type(heap);
                 Err(SimpleException::new_msg(
@@ -53,9 +70,10 @@ pub fn builtin_divmod(heap: &mut Heap<impl ResourceTracker>, args: ArgValues) ->
                 )
                 .into())
             }
-        }
-        (Value::Ref(id), Value::Int(y)) => {
-            if let HeapData::LongInt(li) = heap.get(*id) {
+        },
+        // LongInt / Int or Float / Int
+        (Value::Ref(id), Value::Int(y)) => match heap.get(*id) {
+            HeapData::LongInt(li) => {
                 if *y == 0 {
                     Err(ExcType::divmod_by_zero())
                 } else {
@@ -66,7 +84,21 @@ pub fn builtin_divmod(heap: &mut Heap<impl ResourceTracker>, args: ArgValues) ->
                     let tuple_id = heap.allocate(HeapData::Tuple(Tuple::new(vec![quot_val, rem_val])))?;
                     Ok(Value::Ref(tuple_id))
                 }
-            } else {
+            }
+            HeapData::Float(x) => {
+                if *y == 0 {
+                    Err(ExcType::divmod_by_zero())
+                } else {
+                    let yf = f64::from(*y);
+                    let quot = (x / yf).floor();
+                    let rem = x - quot * yf;
+                    let quot_val = Value::Ref(heap.allocate(HeapData::Float(quot))?);
+                    let rem_val = Value::Ref(heap.allocate(HeapData::Float(rem))?);
+                    let tuple_id = heap.allocate(HeapData::Tuple(Tuple::new(vec![quot_val, rem_val])))?;
+                    Ok(Value::Ref(tuple_id))
+                }
+            }
+            _ => {
                 let a_type = a.py_type(heap);
                 let b_type = b.py_type(heap);
                 Err(SimpleException::new_msg(
@@ -75,30 +107,59 @@ pub fn builtin_divmod(heap: &mut Heap<impl ResourceTracker>, args: ArgValues) ->
                 )
                 .into())
             }
-        }
-        (Value::Ref(id1), Value::Ref(id2)) => {
-            let x_bi = if let HeapData::LongInt(li) = heap.get(*id1) {
-                li.inner().clone()
-            } else {
-                let a_type = a.py_type(heap);
-                let b_type = b.py_type(heap);
-                return Err(SimpleException::new_msg(
-                    ExcType::TypeError,
-                    format!("unsupported operand type(s) for divmod(): '{a_type}' and '{b_type}'"),
-                )
-                .into());
-            };
-            if let HeapData::LongInt(li) = heap.get(*id2) {
-                if li.is_zero() {
+        },
+        // Ref / Ref: LongInt/LongInt, Float/Float, etc.
+        (Value::Ref(id1), Value::Ref(id2)) => match (heap.get(*id1), heap.get(*id2)) {
+            (HeapData::LongInt(li1), HeapData::LongInt(li2)) => {
+                if li2.is_zero() {
                     Err(ExcType::divmod_by_zero())
                 } else {
-                    let (quot, rem) = bigint_floor_divmod(&x_bi, li.inner());
+                    let (quot, rem) = bigint_floor_divmod(li1.inner(), li2.inner());
                     let quot_val = LongInt::new(quot).into_value(heap)?;
                     let rem_val = LongInt::new(rem).into_value(heap)?;
                     let tuple_id = heap.allocate(HeapData::Tuple(Tuple::new(vec![quot_val, rem_val])))?;
                     Ok(Value::Ref(tuple_id))
                 }
-            } else {
+            }
+            (HeapData::Float(x), HeapData::Float(y)) => {
+                if *y == 0.0 {
+                    Err(ExcType::divmod_by_zero())
+                } else {
+                    let quot = (x / y).floor();
+                    let rem = x - quot * y;
+                    let quot_val = Value::Ref(heap.allocate(HeapData::Float(quot))?);
+                    let rem_val = Value::Ref(heap.allocate(HeapData::Float(rem))?);
+                    let tuple_id = heap.allocate(HeapData::Tuple(Tuple::new(vec![quot_val, rem_val])))?;
+                    Ok(Value::Ref(tuple_id))
+                }
+            }
+            (HeapData::Float(x), HeapData::LongInt(li)) => {
+                if li.is_zero() {
+                    Err(ExcType::divmod_by_zero())
+                } else {
+                    let y = li.to_f64().unwrap_or(f64::INFINITY);
+                    let quot = (x / y).floor();
+                    let rem = x - quot * y;
+                    let quot_val = Value::Ref(heap.allocate(HeapData::Float(quot))?);
+                    let rem_val = Value::Ref(heap.allocate(HeapData::Float(rem))?);
+                    let tuple_id = heap.allocate(HeapData::Tuple(Tuple::new(vec![quot_val, rem_val])))?;
+                    Ok(Value::Ref(tuple_id))
+                }
+            }
+            (HeapData::LongInt(li), HeapData::Float(y)) => {
+                if *y == 0.0 {
+                    Err(ExcType::divmod_by_zero())
+                } else {
+                    let x = li.to_f64().unwrap_or(f64::INFINITY);
+                    let quot = (x / y).floor();
+                    let rem = x - quot * y;
+                    let quot_val = Value::Ref(heap.allocate(HeapData::Float(quot))?);
+                    let rem_val = Value::Ref(heap.allocate(HeapData::Float(rem))?);
+                    let tuple_id = heap.allocate(HeapData::Tuple(Tuple::new(vec![quot_val, rem_val])))?;
+                    Ok(Value::Ref(tuple_id))
+                }
+            }
+            _ => {
                 let a_type = a.py_type(heap);
                 let b_type = b.py_type(heap);
                 Err(SimpleException::new_msg(
@@ -107,42 +168,7 @@ pub fn builtin_divmod(heap: &mut Heap<impl ResourceTracker>, args: ArgValues) ->
                 )
                 .into())
             }
-        }
-        (Value::Float(x), Value::Float(y)) => {
-            if *y == 0.0 {
-                Err(ExcType::divmod_by_zero())
-            } else {
-                let quot = (x / y).floor();
-                let rem = x - quot * y;
-                let tuple_id =
-                    heap.allocate(HeapData::Tuple(Tuple::new(vec![Value::Float(quot), Value::Float(rem)])))?;
-                Ok(Value::Ref(tuple_id))
-            }
-        }
-        (Value::Int(x), Value::Float(y)) => {
-            if *y == 0.0 {
-                Err(ExcType::divmod_by_zero())
-            } else {
-                let xf = *x as f64;
-                let quot = (xf / y).floor();
-                let rem = xf - quot * y;
-                let tuple_id =
-                    heap.allocate(HeapData::Tuple(Tuple::new(vec![Value::Float(quot), Value::Float(rem)])))?;
-                Ok(Value::Ref(tuple_id))
-            }
-        }
-        (Value::Float(x), Value::Int(y)) => {
-            if *y == 0 {
-                Err(ExcType::divmod_by_zero())
-            } else {
-                let yf = *y as f64;
-                let quot = (x / yf).floor();
-                let rem = x - quot * yf;
-                let tuple_id =
-                    heap.allocate(HeapData::Tuple(Tuple::new(vec![Value::Float(quot), Value::Float(rem)])))?;
-                Ok(Value::Ref(tuple_id))
-            }
-        }
+        },
         _ => {
             let a_type = a.py_type(heap);
             let b_type = b.py_type(heap);

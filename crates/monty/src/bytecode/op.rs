@@ -41,6 +41,11 @@ pub enum Opcode {
     LoadFalse,
     /// Push small integer (-128 to 127). Operand: i8.
     LoadSmallInt,
+    /// Push float literal. Operand: 8 bytes (f64 bits).
+    ///
+    /// Since floats are now heap-allocated, we can't store them in the const pool.
+    /// Instead, the f64 bits are embedded directly in the bytecode.
+    LoadFloat,
 
     // === Variables ===
     // Specialized no-operand versions for common slots (hot path)
@@ -396,10 +401,10 @@ impl Opcode {
             InplaceAdd, InplaceAnd, InplaceDiv, InplaceFloorDiv, InplaceLShift, InplaceMod, InplaceMul, InplaceOr,
             InplacePow, InplaceRShift, InplaceSub, InplaceXor, Jump, JumpIfFalse, JumpIfFalseOrPop, JumpIfTrue,
             JumpIfTrueOrPop, ListAppend, ListExtend, ListToTuple, LoadAttr, LoadAttrImport, LoadCell, LoadConst,
-            LoadFalse, LoadGlobal, LoadLocal, LoadLocal0, LoadLocal1, LoadLocal2, LoadLocal3, LoadLocalW, LoadModule,
-            LoadNone, LoadSmallInt, LoadTrue, MakeClosure, MakeFunction, Nop, Pop, Raise, RaiseFrom, Reraise,
-            ReturnValue, Rot2, Rot3, SetAdd, StoreAttr, StoreCell, StoreGlobal, StoreLocal, StoreLocalW, StoreSubscr,
-            UnaryInvert, UnaryNeg, UnaryNot, UnaryPos, UnpackEx, UnpackSequence,
+            LoadFalse, LoadFloat, LoadGlobal, LoadLocal, LoadLocal0, LoadLocal1, LoadLocal2, LoadLocal3, LoadLocalW,
+            LoadModule, LoadNone, LoadSmallInt, LoadTrue, MakeClosure, MakeFunction, Nop, Pop, Raise, RaiseFrom,
+            Reraise, ReturnValue, Rot2, Rot3, SetAdd, StoreAttr, StoreCell, StoreGlobal, StoreLocal, StoreLocalW,
+            StoreSubscr, UnaryInvert, UnaryNeg, UnaryNot, UnaryPos, UnpackEx, UnpackSequence,
         };
         Some(match self {
             // Stack operations
@@ -408,7 +413,7 @@ impl Opcode {
             Rot2 | Rot3 => 0, // reorder, no net change
 
             // Constants & Literals (all push 1)
-            LoadConst | LoadNone | LoadTrue | LoadFalse | LoadSmallInt => 1,
+            LoadConst | LoadNone | LoadTrue | LoadFalse | LoadSmallInt | LoadFloat => 1,
 
             // Variables - loads push, stores pop
             LoadLocal0 | LoadLocal1 | LoadLocal2 | LoadLocal3 => 1,

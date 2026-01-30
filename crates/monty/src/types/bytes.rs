@@ -289,14 +289,15 @@ impl PyTrait for Bytes {
 
         // Extract integer index, accepting both Int and Bool (True=1, False=0)
         let index = match key {
-            Value::Int(i) => *i,
+            Value::Int(i) => i64::from(*i),
             Value::Bool(b) => i64::from(*b),
             _ => return Err(ExcType::type_error_indices(Type::Bytes, key.py_type(heap))),
         };
 
         // Use helper for byte indexing
         let byte = get_byte_at_index(&self.0, index).ok_or_else(ExcType::bytes_index_error)?;
-        Ok(Value::Int(i64::from(byte)))
+        // Byte values (0-255) always fit in i32
+        Ok(Value::Int(i32::from(byte)))
     }
 
     fn py_eq(&self, other: &Self, _heap: &mut Heap<impl ResourceTracker>, _interns: &Interns) -> bool {
@@ -594,7 +595,7 @@ fn bytes_count(
     };
 
     let count_i64 = i64::try_from(count).expect("count exceeds i64::MAX");
-    Ok(Value::Int(count_i64))
+    Ok(crate::value::int_value(count_i64, heap)?)
 }
 
 /// Counts non-overlapping occurrences of needle in haystack.
@@ -635,7 +636,7 @@ fn bytes_find(
         Some(i) => i64::try_from(start + i).expect("index exceeds i64::MAX"),
         None => -1,
     };
-    Ok(Value::Int(idx))
+    Ok(crate::value::int_value(idx, heap)?)
 }
 
 /// Finds the first occurrence of needle in haystack.
@@ -665,7 +666,7 @@ fn bytes_index(
     match result {
         Some(i) => {
             let idx = i64::try_from(start + i).expect("index exceeds i64::MAX");
-            Ok(Value::Int(idx))
+            Ok(crate::value::int_value(idx, heap)?)
         }
         None => Err(ExcType::value_error_subsequence_not_found()),
     }
@@ -1198,7 +1199,7 @@ fn bytes_rfind(
         Some(i) => i64::try_from(start + i).expect("index exceeds i64::MAX"),
         None => -1,
     };
-    Ok(Value::Int(idx))
+    Ok(crate::value::int_value(idx, heap)?)
 }
 
 /// Finds the last occurrence of needle in haystack.
@@ -1230,7 +1231,7 @@ fn bytes_rindex(
     match result {
         Some(i) => {
             let idx = i64::try_from(start + i).expect("index exceeds i64::MAX");
-            Ok(Value::Int(idx))
+            Ok(crate::value::int_value(idx, heap)?)
         }
         None => Err(ExcType::value_error_subsequence_not_found()),
     }

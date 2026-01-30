@@ -132,7 +132,9 @@ impl<T: ResourceTracker, P: PrintWriter> VM<'_, T, P> {
         match spec_value {
             Value::Int(n) if *n < 0 => {
                 // Decode the encoded format spec; n < 0 ensures (-n - 1) >= 0
-                let encoded = u64::try_from((-*n) - 1).expect("format spec encoding validated non-negative");
+                // The compact encoding uses u32, and -(n+1) recovers the original
+                #[expect(clippy::cast_sign_loss, reason = "n < 0 ensures (-n - 1) >= 0")]
+                let encoded = ((-*n) - 1) as u32;
                 Ok(decode_format_spec(encoded))
             }
             _ => {

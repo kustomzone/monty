@@ -23,7 +23,7 @@ pub fn builtin_enumerate(
 
     // Get start index (default 0)
     let mut index: i64 = match &start {
-        Some(Value::Int(n)) => *n,
+        Some(Value::Int(n)) => i64::from(*n),
         Some(Value::Bool(b)) => i64::from(*b),
         Some(v) => {
             let type_name = v.py_type(heap);
@@ -49,7 +49,8 @@ pub fn builtin_enumerate(
 
     while let Some(item) = iter.for_next(heap, interns)? {
         // Create tuple (index, item)
-        let tuple_id = heap.allocate(HeapData::Tuple(Tuple::new(vec![Value::Int(index), item])))?;
+        let index_val = crate::value::int_value(index, heap)?;
+        let tuple_id = heap.allocate(HeapData::Tuple(Tuple::new(vec![index_val, item])))?;
         result.push(Value::Ref(tuple_id));
         index += 1;
     }

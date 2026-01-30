@@ -20,7 +20,7 @@ pub fn builtin_hash(heap: &mut Heap<impl ResourceTracker>, args: ArgValues, inte
         Some(hash) => {
             // Python's hash() returns a signed integer; reinterpret bits for large values
             let hash_i64 = i64::from_ne_bytes(hash.to_ne_bytes());
-            Ok(Value::Int(hash_i64))
+            Ok(crate::value::int_value(hash_i64, heap)?)
         }
         None => Err(ExcType::type_error_unhashable(value.py_type(heap))),
     };

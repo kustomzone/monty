@@ -141,6 +141,19 @@ impl CodeBuilder {
         self.track_stack_effect_u16(op, operand);
     }
 
+    /// Emits an instruction with an f64 operand (8 bytes, little-endian bits).
+    ///
+    /// Used for `LoadFloat` opcode which embeds the f64 bits directly in bytecode.
+    pub fn emit_f64(&mut self, op: Opcode, operand: f64) {
+        self.record_location();
+        self.bytecode.push(op as u8);
+        self.bytecode.extend_from_slice(&operand.to_bits().to_le_bytes());
+        // Track stack effect (LoadFloat pushes 1)
+        if let Some(effect) = op.stack_effect() {
+            self.adjust_stack(effect);
+        }
+    }
+
     /// Emits an instruction with a u16 operand followed by a u8 operand.
     ///
     /// Used for MakeFunction: func_id (u16) + defaults_count (u8)

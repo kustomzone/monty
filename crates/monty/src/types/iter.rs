@@ -14,14 +14,17 @@
 //!
 //! For the VM's `ForIter` opcode, `advance_on_heap()` uses two strategies:
 //!
-//! **Fast path** for simple iterators (Range, InternBytes, ASCII IterStr):
+//! **Fast path** for simple iterators (InternBytes, ASCII IterStr):
 //! - Single `get_mut()` call to compute value and advance index
 //! - No additional heap access needed during iteration
 //!
-//! **Multi-phase approach** for complex iterators (IterStr, HeapRef):
+//! **Multi-phase approach** for complex iterators (Range, IterStr, HeapRef):
 //! 1. `iter_state()` - reads current state without mutation, returns `Option<IterState>`
 //! 2. Get the value (may access other heap objects like strings or containers)
 //! 3. `advance()` - updates the index after the caller has done its work
+//!
+//! Range uses the multi-phase approach because range values can exceed i32, requiring
+//! heap access for `int_value()` to potentially allocate a `LongInt`.
 //!
 //! This allows `advance_on_heap()` to coordinate access without extracting
 //! the iterator from the heap (avoiding `std::mem::replace` overhead).
@@ -149,9 +152,18 @@ impl MontyIter {
     /// Returns `None` if the iterator is exhausted.
     fn iter_state(&self) -> Option<IterState> {
         match &self.iter_value {
-            // Range, InternBytes, and ASCII IterStr are handled by try_advance_simple() fast path
-            IterValue::Range { .. } | IterValue::InternBytes { .. } => {
-                unreachable!("Range and InternBytes use fast path, not iter_state")
+            // Range needs multi-phase approach because range values can exceed i32,
+            // requiring heap access for int_value()
+            IterValue::Range { next, len, .. } => {
+                if self.index >= *len {
+                    None
+                } else {
+                    Some(IterState::Range { value: *next })
+                }
+            }
+            // InternBytes uses try_advance_simple() fast path
+            IterValue::InternBytes { .. } => {
+                unreachable!("InternBytes uses fast path, not iter_state")
             }
             IterValue::IterStr {
                 string,
@@ -196,7 +208,7 @@ impl MontyIter {
 
     /// Advances the iterator by one step.
     ///
-    /// This is phase 2 of the two-phase iteration approach. Call this after
+    /// This is phase 3 of the multi-phase iteration approach. Call this after
     /// successfully retrieving the value using the data from `iter_state()`.
     ///
     /// For string iterators, `string_char_len` must be provided (the UTF-8 byte
@@ -205,33 +217,35 @@ impl MontyIter {
     #[inline]
     pub fn advance(&mut self, string_char_len: Option<usize>) {
         self.index += 1;
-        if let Some(char_len) = string_char_len
-            && let IterValue::IterStr { byte_offset, .. } = &mut self.iter_value
-        {
-            *byte_offset += char_len;
+        match &mut self.iter_value {
+            IterValue::Range { next, step, .. } => {
+                *next += *step;
+            }
+            IterValue::IterStr { byte_offset, .. } => {
+                if let Some(char_len) = string_char_len {
+                    *byte_offset += char_len;
+                }
+            }
+            _ => {}
         }
     }
 
     /// Attempts to advance simple iterator types that don't need additional heap access.
     ///
-    /// Returns `Some(result)` if handled (Range, InternBytes, ASCII IterStr),
-    /// `None` if caller should use the multi-phase approach (non-ASCII IterStr, HeapRef).
+    /// Returns `Some(result)` if handled (InternBytes, ASCII IterStr),
+    /// `None` if caller should use the multi-phase approach (Range, non-ASCII IterStr, HeapRef).
     ///
     /// This optimization avoids two heap lookups for iterator types that can compute
     /// their next value without accessing other heap objects.
+    ///
+    /// Range is NOT handled here because range values can exceed i32, requiring
+    /// `int_value()` which may allocate a `LongInt` on the heap.
     #[inline]
     fn try_advance_simple(&mut self, interns: &Interns) -> Option<RunResult<Option<Value>>> {
         match &mut self.iter_value {
-            IterValue::Range { next, step, len } => {
-                if self.index >= *len {
-                    Some(Ok(None))
-                } else {
-                    let value = *next;
-                    *next += *step;
-                    self.index += 1;
-                    Some(Ok(Some(Value::Int(value))))
-                }
-            }
+            // Range values can exceed i32, so we can't use the fast path.
+            // Fall back to for_next() which has heap access for int_value().
+            IterValue::Range { .. } => None,
             IterValue::IterStr {
                 string,
                 byte_offset,
@@ -256,7 +270,8 @@ impl MontyIter {
                     let i = self.index;
                     self.index += 1;
                     let bytes = interns.get_bytes(*bytes_id);
-                    Some(Ok(Some(Value::Int(i64::from(bytes[i])))))
+                    // Byte values (0-255) fit in i32
+                    Some(Ok(Some(Value::Int(i32::from(bytes[i])))))
                 }
             }
             IterValue::HeapRef { .. } => None,
@@ -277,7 +292,8 @@ impl MontyIter {
                 let value = *next;
                 *next += *step;
                 self.index += 1;
-                Ok(Some(Value::Int(value)))
+                // Range values can exceed i32, use int_value to handle overflow
+                Ok(Some(crate::value::int_value(value, heap)?))
             }
             IterValue::IterStr {
                 string,
@@ -310,7 +326,8 @@ impl MontyIter {
                 let i = self.index;
                 self.index += 1;
                 let bytes = interns.get_bytes(*bytes_id);
-                Ok(Some(Value::Int(i64::from(bytes[i]))))
+                // Byte values (0-255) fit in i32
+                Ok(Some(Value::Int(i32::from(bytes[i]))))
             }
             IterValue::HeapRef {
                 heap_id,
@@ -374,13 +391,16 @@ impl MontyIter {
 
 /// Advances an iterator stored on the heap and returns the next value.
 ///
-/// Uses a fast path for simple iterators (Range, InternBytes, ASCII IterStr) that don't need
+/// Uses a fast path for simple iterators (InternBytes, ASCII IterStr) that don't need
 /// additional heap access - these are handled with a single mutable borrow.
 ///
-/// For complex iterators (IterStr, HeapRef), uses a multi-phase approach:
+/// For complex iterators (Range, IterStr, HeapRef), uses a multi-phase approach:
 /// 1. Read iterator state (immutable borrow ends)
 /// 2. Based on state, get the value (may access other heap objects)
 /// 3. Update iterator index (mutable borrow)
+///
+/// Range uses the multi-phase approach because range values can exceed i32, requiring
+/// `int_value()` which may allocate a `LongInt` on the heap.
 ///
 /// This is more efficient than `std::mem::replace` with a placeholder because
 /// it avoids creating and moving placeholder objects on every iteration.
@@ -415,6 +435,11 @@ pub(crate) fn advance_on_heap(
 
     // Phase 2: Based on state, get the value and determine char_len for strings
     let (value, string_char_len) = match state {
+        IterState::Range { value } => {
+            // Range values can exceed i32, use int_value to handle overflow
+            let int_val = crate::value::int_value(value, heap)?;
+            (int_val, None)
+        }
         IterState::IterStr { char, char_len } => {
             let value = allocate_char(char, heap)?;
             (value, Some(char_len))
@@ -477,7 +502,8 @@ fn get_heap_item(
                 dict.key_at(index).expect("index should be valid").copy_for_extend(),
             ))
         }
-        HeapData::Bytes(bytes) => Ok(Some(Value::Int(i64::from(bytes.as_slice()[index])))),
+        // Byte values (0-255) fit in i32
+        HeapData::Bytes(bytes) => Ok(Some(Value::Int(i32::from(bytes.as_slice()[index])))),
         HeapData::Set(set) => {
             // Check for set mutation
             if let Some(expected) = expected_len
@@ -563,9 +589,9 @@ pub fn iterator_next(
 
 /// Snapshot of iterator state needed to produce the next value.
 ///
-/// This enum captures state for complex iterator types (IterStr, HeapRef) that
-/// require the multi-phase approach in `advance_on_heap()`. Simple types (Range,
-/// InternBytes, ASCII IterStr) are handled by the fast path and don't use this enum.
+/// This enum captures state for iterator types that require the multi-phase approach
+/// in `advance_on_heap()`. Simple types (InternBytes, ASCII IterStr) are handled by
+/// the fast path and don't use this enum.
 ///
 /// The multi-phase approach avoids borrow conflicts:
 /// 1. Read `Option<IterState>` from iterator (immutable borrow ends, `None` means exhausted)
@@ -573,6 +599,9 @@ pub fn iterator_next(
 /// 3. Call `advance()` to update the iterator index
 #[derive(Debug, Clone, Copy)]
 enum IterState {
+    /// Range iterator yields this i64 value. Needs heap access for `int_value()` since
+    /// range values can exceed i32.
+    Range { value: i64 },
     /// String iterator yields this character; char_len is UTF-8 byte length for advance().
     IterStr { char: char, char_len: usize },
     /// Heap-based iterator (List, Tuple, NamedTuple, Dict, Bytes, Set, FrozenSet).
@@ -729,8 +758,8 @@ impl IterValue {
             HeapData::Str(s) => Some(Self::from_str(s.as_str())),
             // Range: copy values for iteration
             HeapData::Range(range) => Some(Self::from_range(range)),
-            // Closures, FunctionDefaults, Cells, Exceptions, Dataclasses, Iterators, LongInts, Slices, Modules,
-            // and async types are not iterable
+            // Closures, FunctionDefaults, Cells, Exceptions, Dataclasses, Iterators, LongInts, Floats, Slices,
+            // Modules, and async types are not iterable
             HeapData::Closure(_, _, _)
             | HeapData::FunctionDefaults(_, _)
             | HeapData::Cell(_)
@@ -738,6 +767,7 @@ impl IterValue {
             | HeapData::Dataclass(_)
             | HeapData::Iter(_)
             | HeapData::LongInt(_)
+            | HeapData::Float(_)
             | HeapData::Slice(_)
             | HeapData::Module(_)
             | HeapData::Coroutine(_)

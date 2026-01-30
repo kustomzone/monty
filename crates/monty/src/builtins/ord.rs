@@ -21,7 +21,8 @@ pub fn builtin_ord(heap: &mut Heap<impl ResourceTracker>, args: ArgValues, inter
             let s = interns.get_str(*string_id);
             let mut chars = s.chars();
             if let (Some(c), None) = (chars.next(), chars.next()) {
-                Ok(Value::Int(c as i64))
+                // Unicode code points fit in u32 (max 0x10FFFF), which fits in i32
+                Ok(Value::Int(c as i32))
             } else {
                 let len = s.chars().count();
                 Err(SimpleException::new_msg(
@@ -35,7 +36,8 @@ pub fn builtin_ord(heap: &mut Heap<impl ResourceTracker>, args: ArgValues, inter
             if let HeapData::Str(s) = heap.get(*id) {
                 let mut chars = s.as_str().chars();
                 if let (Some(c), None) = (chars.next(), chars.next()) {
-                    Ok(Value::Int(c as i64))
+                    // Unicode code points fit in u32 (max 0x10FFFF), which fits in i32
+                    Ok(Value::Int(c as i32))
                 } else {
                     let len = s.as_str().chars().count();
                     Err(SimpleException::new_msg(

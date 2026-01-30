@@ -641,7 +641,9 @@ impl<'a> Compiler<'a> {
                 self.code.set_location(expr_loc.position, None);
                 // ModEq needs special handling - it has a constant operand
                 if let CmpOperator::ModEq(value) = op {
-                    let const_idx = self.code.add_const(Value::Int(*value));
+                    // ModEq values should fit in i32 for typical use cases
+                    let value_i32 = i32::try_from(*value).expect("ModEq value exceeds i32::MAX");
+                    let const_idx = self.code.add_const(Value::Int(value_i32));
                     self.code.emit_u16(Opcode::CompareModEq, const_idx);
                 } else {
                     self.code.emit(cmp_operator_to_opcode(op));
@@ -861,7 +863,13 @@ impl<'a> Compiler<'a> {
                 }
             }
 
-            // For Float, Str, Bytes, Ellipsis - use LoadConst with Value::from
+            Literal::Float(f) => {
+                // Emit LoadFloat with the f64 bits embedded in bytecode
+                // (floats are heap-allocated and can't be stored in const pool)
+                self.code.emit_f64(Opcode::LoadFloat, *f);
+            }
+
+            // For Str, Bytes, Ellipsis - use LoadConst with Value::from
             _ => {
                 let idx = self.code.add_const(Value::from(*literal));
                 self.code.emit_u16(Opcode::LoadConst, idx);
@@ -1028,7 +1036,9 @@ impl<'a> Compiler<'a> {
             // Emit comparison
             self.code.set_location(position, None);
             if let CmpOperator::ModEq(value) = op {
-                let const_idx = self.code.add_const(Value::Int(*value));
+                // ModEq values should fit in i32 for typical use cases
+                let value_i32 = i32::try_from(*value).expect("ModEq value exceeds i32::MAX");
+                let const_idx = self.code.add_const(Value::Int(value_i32));
                 self.code.emit_u16(Opcode::CompareModEq, const_idx);
             } else {
                 self.code.emit(cmp_operator_to_opcode(op));
@@ -2255,12 +2265,20 @@ impl<'a> Compiler<'a> {
 
         match format_spec {
             None => Ok(conv_bits),
-            Some(FormatSpec::Static(parsed)) => {
-                // Static format spec - push a marker constant with the parsed spec info
-                // We store this as a special format spec value in the constant pool
-                // The VM will recognize this and use the pre-parsed spec
-                let const_idx = self.add_format_spec_const(parsed);
-                self.code.emit_u16(Opcode::LoadConst, const_idx);
+            Some(FormatSpec::Static { parsed, raw_string }) => {
+                // Check if we have a raw string (for non-ASCII fill chars that can't
+                // be compactly encoded). If so, use it for runtime parsing.
+                if let Some(string_id) = raw_string {
+                    // Non-ASCII fill char - use the pre-interned raw string for runtime parsing
+                    let const_idx = self.code.add_const(Value::InternString(*string_id));
+                    self.code.emit_u16(Opcode::LoadConst, const_idx);
+                } else {
+                    // Static format spec - push a marker constant with the parsed spec info
+                    // We store this as a special format spec value in the constant pool
+                    // The VM will recognize this and use the pre-parsed spec
+                    let const_idx = self.add_format_spec_const(parsed);
+                    self.code.emit_u16(Opcode::LoadConst, const_idx);
+                }
                 Ok(conv_bits | 0x04) // has format spec on stack
             }
             Some(FormatSpec::Dynamic(dynamic_parts)) => {
@@ -2284,8 +2302,10 @@ impl<'a> Compiler<'a> {
         let encoded = encode_format_spec(spec);
         // Use negative to distinguish from regular ints (format spec marker)
         // We negate and subtract 1 to ensure it's negative and recoverable
-        let encoded_i64 = i64::try_from(encoded).expect("format spec encoding exceeds i64::MAX");
-        let marker = -(encoded_i64 + 1);
+        // The compact encoding fits in 31 bits, so encoded + 1 fits in i32 as positive,
+        // and -(encoded + 1) fits in i32 as negative
+        #[expect(clippy::cast_possible_wrap, reason = "encoded is u32 < 2^31, so +1 fits in i32")]
+        let marker = -((encoded as i32) + 1);
         self.code.add_const(Value::Int(marker))
     }
 

@@ -186,9 +186,9 @@ impl MontyObject {
             Self::Ellipsis => Ok(Value::Ellipsis),
             Self::None => Ok(Value::None),
             Self::Bool(b) => Ok(Value::Bool(b)),
-            Self::Int(i) => Ok(Value::Int(i)),
+            Self::Int(i) => Ok(crate::value::int_value(i, heap)?),
             Self::BigInt(bi) => Ok(LongInt::new(bi).into_value(heap)?),
-            Self::Float(f) => Ok(Value::Float(f)),
+            Self::Float(f) => Ok(Value::Ref(heap.allocate(HeapData::Float(f))?)),
             Self::String(s) => Ok(Value::Ref(heap.allocate(HeapData::Str(Str::new(s)))?)),
             Self::Bytes(b) => Ok(Value::Ref(heap.allocate(HeapData::Bytes(Bytes::new(b)))?)),
             Self::List(items) => {
@@ -287,8 +287,7 @@ impl MontyObject {
             Value::Ellipsis => Self::Ellipsis,
             Value::None => Self::None,
             Value::Bool(b) => Self::Bool(*b),
-            Value::Int(i) => Self::Int(*i),
-            Value::Float(f) => Self::Float(*f),
+            Value::Int(i) => Self::Int(i64::from(*i)),
             Value::InternString(string_id) => Self::String(interns.get_str(*string_id).to_owned()),
             Value::InternBytes(bytes_id) => Self::Bytes(interns.get_bytes(*bytes_id).to_owned()),
             Value::Ref(id) => {
@@ -403,6 +402,7 @@ impl MontyObject {
                         Self::Repr("<iterator>".to_owned())
                     }
                     HeapData::LongInt(li) => Self::BigInt(li.inner().clone()),
+                    HeapData::Float(f) => Self::Float(*f),
                     HeapData::Module(m) => {
                         // Modules are represented as a repr string
                         Self::Repr(format!("<module '{}'>", interns.get_str(m.name())))

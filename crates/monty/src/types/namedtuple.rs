@@ -156,7 +156,7 @@ impl PyTrait for NamedTuple {
     fn py_getitem(&self, key: &Value, heap: &mut Heap<impl ResourceTracker>, _interns: &Interns) -> RunResult<Value> {
         // Extract integer index from key, returning TypeError if not an int
         let index = match key {
-            Value::Int(i) => *i,
+            Value::Int(i) => i64::from(*i),
             _ => return Err(ExcType::type_error_indices(Type::NamedTuple, key.py_type(heap))),
         };
 

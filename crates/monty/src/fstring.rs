@@ -11,7 +11,7 @@ use std::str::FromStr;
 use crate::{
     exception_private::{ExcType, RunError, SimpleException},
     expressions::ExprLoc,
-    heap::Heap,
+    heap::{Heap, HeapData},
     intern::{Interns, StringId},
     resource::ResourceTracker,
     types::{PyTrait, Type},
@@ -72,7 +72,7 @@ pub enum FStringPart {
 ///
 /// Can be either a pre-parsed static spec or contain nested interpolations.
 /// For example:
-/// - `f"{value:>10}"` has `FormatSpec::Static(ParsedFormatSpec { ... })`
+/// - `f"{value:>10}"` has `FormatSpec::Static { ... }`
 /// - `f"{value:{width}}"` has `FormatSpec::Dynamic` with the `width` variable
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub enum FormatSpec {
@@ -80,7 +80,17 @@ pub enum FormatSpec {
     ///
     /// Parsing happens at parse time to avoid runtime string parsing overhead.
     /// Invalid specs cause a parse error immediately.
-    Static(ParsedFormatSpec),
+    ///
+    /// The `raw_string` field is set when the fill character is non-ASCII
+    /// (can't be compactly encoded), allowing the compiler to fall back to
+    /// runtime parsing using the original string.
+    Static {
+        /// The parsed format specification.
+        parsed: ParsedFormatSpec,
+        /// Original string, stored only when the fill char is non-ASCII.
+        /// This is `Some(string_id)` when the fill can't be compactly encoded.
+        raw_string: Option<crate::intern::StringId>,
+    },
     /// Dynamic format spec with nested f-string parts
     ///
     /// These must be evaluated at runtime, then parsed into a `ParsedFormatSpec`.
@@ -221,6 +231,50 @@ impl FromStr for ParsedFormatSpec {
     }
 }
 
+impl std::fmt::Display for ParsedFormatSpec {
+    /// Converts the parsed format spec back to a format string.
+    ///
+    /// This is used by the compiler when the format spec cannot be compactly
+    /// encoded (e.g., non-ASCII fill characters) and must be stored as a string
+    /// for runtime parsing.
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        // Fill and align: only output fill if there's an alignment
+        if let Some(align) = self.align {
+            if self.fill != ' ' {
+                write!(f, "{}", self.fill)?;
+            }
+            write!(f, "{align}")?;
+        }
+
+        // Sign
+        if let Some(sign) = self.sign {
+            write!(f, "{sign}")?;
+        }
+
+        // Zero-padding
+        if self.zero_pad {
+            write!(f, "0")?;
+        }
+
+        // Width
+        if self.width > 0 {
+            write!(f, "{}", self.width)?;
+        }
+
+        // Precision
+        if let Some(prec) = self.precision {
+            write!(f, ".{prec}")?;
+        }
+
+        // Type character
+        if let Some(type_char) = self.type_char {
+            write!(f, "{type_char}")?;
+        }
+
+        Ok(())
+    }
+}
+
 // ============================================================================
 // Format errors
 // ============================================================================
@@ -266,27 +320,57 @@ pub fn format_with_spec(
     let value_type = value.py_type(heap);
 
     match (value, spec.type_char) {
-        // Integer formatting
-        (Value::Int(n), None | Some('d')) => Ok(format_int(*n, spec)),
-        (Value::Int(n), Some('b')) => Ok(format_int_base(*n, 2, spec)?),
-        (Value::Int(n), Some('o')) => Ok(format_int_base(*n, 8, spec)?),
-        (Value::Int(n), Some('x')) => Ok(format_int_base(*n, 16, spec)?),
-        (Value::Int(n), Some('X')) => Ok(format_int_base(*n, 16, spec)?.to_uppercase()),
-        (Value::Int(n), Some('c')) => Ok(format_char(*n, spec)?),
+        // Integer formatting (convert i32 to i64 for formatting functions)
+        (Value::Int(n), None | Some('d')) => Ok(format_int(i64::from(*n), spec)),
+        (Value::Int(n), Some('b')) => Ok(format_int_base(i64::from(*n), 2, spec)?),
+        (Value::Int(n), Some('o')) => Ok(format_int_base(i64::from(*n), 8, spec)?),
+        (Value::Int(n), Some('x')) => Ok(format_int_base(i64::from(*n), 16, spec)?),
+        (Value::Int(n), Some('X')) => Ok(format_int_base(i64::from(*n), 16, spec)?.to_uppercase()),
+        (Value::Int(n), Some('c')) => Ok(format_char(i64::from(*n), spec)?),
 
-        // Float formatting
-        (Value::Float(f), None | Some('g' | 'G')) => Ok(format_float_g(*f, spec)),
-        (Value::Float(f), Some('f' | 'F')) => Ok(format_float_f(*f, spec)),
-        (Value::Float(f), Some('e')) => Ok(format_float_e(*f, spec, false)),
-        (Value::Float(f), Some('E')) => Ok(format_float_e(*f, spec, true)),
-        (Value::Float(f), Some('%')) => Ok(format_float_percent(*f, spec)),
+        // Float formatting (via heap)
+        (Value::Ref(id), None | Some('g' | 'G')) if matches!(heap.get(*id), HeapData::Float(_)) => {
+            if let HeapData::Float(f) = heap.get(*id) {
+                Ok(format_float_g(*f, spec))
+            } else {
+                unreachable!()
+            }
+        }
+        (Value::Ref(id), Some('f' | 'F')) if matches!(heap.get(*id), HeapData::Float(_)) => {
+            if let HeapData::Float(f) = heap.get(*id) {
+                Ok(format_float_f(*f, spec))
+            } else {
+                unreachable!()
+            }
+        }
+        (Value::Ref(id), Some('e')) if matches!(heap.get(*id), HeapData::Float(_)) => {
+            if let HeapData::Float(f) = heap.get(*id) {
+                Ok(format_float_e(*f, spec, false))
+            } else {
+                unreachable!()
+            }
+        }
+        (Value::Ref(id), Some('E')) if matches!(heap.get(*id), HeapData::Float(_)) => {
+            if let HeapData::Float(f) = heap.get(*id) {
+                Ok(format_float_e(*f, spec, true))
+            } else {
+                unreachable!()
+            }
+        }
+        (Value::Ref(id), Some('%')) if matches!(heap.get(*id), HeapData::Float(_)) => {
+            if let HeapData::Float(f) = heap.get(*id) {
+                Ok(format_float_percent(*f, spec))
+            } else {
+                unreachable!()
+            }
+        }
 
         // Int to float formatting (Python allows this)
-        (Value::Int(n), Some('f' | 'F')) => Ok(format_float_f(*n as f64, spec)),
-        (Value::Int(n), Some('e')) => Ok(format_float_e(*n as f64, spec, false)),
-        (Value::Int(n), Some('E')) => Ok(format_float_e(*n as f64, spec, true)),
-        (Value::Int(n), Some('g' | 'G')) => Ok(format_float_g(*n as f64, spec)),
-        (Value::Int(n), Some('%')) => Ok(format_float_percent(*n as f64, spec)),
+        (Value::Int(n), Some('f' | 'F')) => Ok(format_float_f(f64::from(*n), spec)),
+        (Value::Int(n), Some('e')) => Ok(format_float_e(f64::from(*n), spec, false)),
+        (Value::Int(n), Some('E')) => Ok(format_float_e(f64::from(*n), spec, true)),
+        (Value::Int(n), Some('g' | 'G')) => Ok(format_float_g(f64::from(*n), spec)),
+        (Value::Int(n), Some('%')) => Ok(format_float_percent(f64::from(*n), spec)),
 
         // String formatting (including InternString and heap strings)
         (_, None | Some('s')) if value_type == Type::Str => {
@@ -315,34 +399,29 @@ pub fn format_with_spec(
 /// Encodes a ParsedFormatSpec into a u64 for storage in bytecode constants.
 ///
 /// Encoding layout (fits in 48 bits):
-/// - bits 0-7: fill character (as ASCII, default space=32)
-/// - bits 8-10: align (0=none, 1='<', 2='>', 3='^', 4='=')
-/// - bits 11-12: sign (0=none, 1='+', 2='-', 3=' ')
-/// - bit 13: zero_pad
-/// - bits 14-29: width (16 bits, max 65535)
-/// - bits 30-45: precision (16 bits, using 0xFFFF as "no precision")
-/// - bits 46-50: type_char (0=none, 1-15=explicit type mapping: b,c,d,e,E,f,F,g,G,n,o,s,x,X,%)
-pub fn encode_format_spec(spec: &ParsedFormatSpec) -> u64 {
-    let fill = spec.fill as u64;
-    let align = match spec.align {
-        None => 0u64,
-        Some('<') => 1,
-        Some('>') => 2,
-        Some('^') => 3,
-        Some('=') => 4,
-        Some(_) => 0,
+/// Encodes a format spec into a u32 for storage in the constant pool.
+///
+/// Uses a compact bit-packing that fits in 31 bits (leaving room for the negative marker
+/// used to distinguish format specs from regular integers in the constant pool).
+///
+/// Bit layout (31 bits total):
+/// - fill:      bits 0-6   (7 bits, ASCII 0-127, non-ASCII truncated to space)
+/// - type_char: bits 7-10  (4 bits, 0-15)
+/// - align:     bits 11-13 (3 bits, 0-4)
+/// - sign:      bits 14-15 (2 bits, 0-3)
+/// - zero_pad:  bit 16     (1 bit)
+/// - width:     bits 17-23 (7 bits, 0-127, clamped if larger)
+/// - precision: bits 24-30 (7 bits, 0-126 for actual value, 127 means "no precision")
+pub fn encode_format_spec(spec: &ParsedFormatSpec) -> u32 {
+    // Fill char: ASCII only (7 bits), non-ASCII defaults to space
+    let fill = if spec.fill.is_ascii() {
+        u32::from(spec.fill as u8)
+    } else {
+        u32::from(b' ')
     };
-    let sign = match spec.sign {
-        None => 0u64,
-        Some('+') => 1,
-        Some('-') => 2,
-        Some(' ') => 3,
-        Some(_) => 0,
-    };
-    let zero_pad = u64::from(spec.zero_pad);
-    let width = spec.width as u64;
-    let precision = spec.precision.map_or(0xFFFFu64, |p| p as u64);
-    let type_char = spec.type_char.map_or(0u64, |c| match c {
+    let fill = fill & 0x7F; // 7 bits
+
+    let type_char = spec.type_char.map_or(0u32, |c| match c {
         'b' => 1,
         'c' => 2,
         'd' => 3,
@@ -361,22 +440,60 @@ pub fn encode_format_spec(spec: &ParsedFormatSpec) -> u64 {
         _ => 0,
     });
 
-    fill | (align << 8) | (sign << 11) | (zero_pad << 13) | (width << 14) | (precision << 30) | (type_char << 46)
+    let align = match spec.align {
+        None => 0u32,
+        Some('<') => 1,
+        Some('>') => 2,
+        Some('^') => 3,
+        Some('=') => 4,
+        Some(_) => 0,
+    };
+
+    let sign = match spec.sign {
+        None => 0u32,
+        Some('+') => 1,
+        Some('-') => 2,
+        Some(' ') => 3,
+        Some(_) => 0,
+    };
+
+    let zero_pad = u32::from(spec.zero_pad);
+
+    // Width: 7 bits (0-127), clamp if larger
+    // Cast is intentional: we clamp to 127 so truncation is handled
+    #[expect(clippy::cast_possible_truncation, reason = "value is clamped to 127")]
+    let width = (spec.width as u32).min(127);
+
+    // Precision: 7 bits (0-126 for actual value, 127 means "no precision")
+    // Cast is intentional: we clamp to 126 so truncation is handled
+    #[expect(clippy::cast_possible_truncation, reason = "value is clamped to 126")]
+    let precision = spec.precision.map_or(127u32, |p| (p as u32).min(126));
+
+    fill | (type_char << 7) | (align << 11) | (sign << 14) | (zero_pad << 16) | (width << 17) | (precision << 24)
 }
 
-/// Decodes a u64 back into a ParsedFormatSpec.
+/// Decodes a u32 back into a ParsedFormatSpec.
 ///
 /// Reverses the bit-packing done by `encode_format_spec`. Used by the VM
 /// when executing `FormatValue` to retrieve the format specification from
 /// the constant pool (where it's stored as a negative integer marker).
-pub fn decode_format_spec(encoded: u64) -> ParsedFormatSpec {
-    let fill = (encoded & 0xFF) as u8 as char;
-    let align_bits = (encoded >> 8) & 0x07;
-    let sign_bits = (encoded >> 11) & 0x03;
-    let zero_pad = ((encoded >> 13) & 0x01) != 0;
-    let width = ((encoded >> 14) & 0xFFFF) as usize;
-    let precision_raw = ((encoded >> 30) & 0xFFFF) as usize;
-    let type_bits = ((encoded >> 46) & 0x1F) as u8;
+///
+/// Bit layout (31 bits total):
+/// - fill:      bits 0-6   (7 bits)
+/// - type_char: bits 7-10  (4 bits)
+/// - align:     bits 11-13 (3 bits)
+/// - sign:      bits 14-15 (2 bits)
+/// - zero_pad:  bit 16     (1 bit)
+/// - width:     bits 17-23 (7 bits)
+/// - precision: bits 24-30 (7 bits, 127 means "no precision")
+pub fn decode_format_spec(encoded: u32) -> ParsedFormatSpec {
+    let fill = ((encoded & 0x7F) as u8) as char;
+    let type_bits = ((encoded >> 7) & 0x0F) as u8;
+    let align_bits = (encoded >> 11) & 0x07;
+    let sign_bits = (encoded >> 14) & 0x03;
+    let zero_pad = ((encoded >> 16) & 0x01) != 0;
+    let width = ((encoded >> 17) & 0x7F) as usize;
+    let precision_raw = ((encoded >> 24) & 0x7F) as usize;
 
     let align = match align_bits {
         1 => Some('<'),
@@ -393,7 +510,8 @@ pub fn decode_format_spec(encoded: u64) -> ParsedFormatSpec {
         _ => None,
     };
 
-    let precision = if precision_raw == 0xFFFF {
+    // 127 means "no precision" in the compact encoding
+    let precision = if precision_raw == 127 {
         None
     } else {
         Some(precision_raw)

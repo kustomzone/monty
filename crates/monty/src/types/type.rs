@@ -189,8 +189,7 @@ impl Type {
                     Some(v) => {
                         let result = match &v {
                             Value::Int(i) => Ok(Value::Int(*i)),
-                            Value::Float(f) => Ok(Value::Int(f64_to_i64_truncate(*f))),
-                            Value::Bool(b) => Ok(Value::Int(i64::from(*b))),
+                            Value::Bool(b) => Ok(Value::Int(i32::from(*b))),
                             Value::InternString(string_id) => parse_int_from_str(interns.get_str(*string_id), heap),
                             Value::Ref(heap_id) => {
                                 // Clone data to release the borrow on heap before mutation
@@ -200,6 +199,10 @@ impl Type {
                                         parse_int_from_str(&s, heap)
                                     }
                                     HeapData::LongInt(li) => li.clone().into_value(heap).map_err(Into::into),
+                                    HeapData::Float(f) => {
+                                        let truncated = f64_to_i64_truncate(*f);
+                                        Ok(crate::value::int_value(truncated, heap)?)
+                                    }
                                     _ => Err(ExcType::type_error_int_conversion(v.py_type(heap))),
                                 }
                             }
@@ -213,17 +216,25 @@ impl Type {
             Self::Float => {
                 let value = args.get_zero_one_arg("float", heap)?;
                 match value {
-                    None => Ok(Value::Float(0.0)),
+                    None => alloc_float(heap, 0.0),
                     Some(v) => {
                         let result = match &v {
-                            Value::Float(f) => Ok(Value::Float(*f)),
-                            Value::Int(i) => Ok(Value::Float(*i as f64)),
-                            Value::Bool(b) => Ok(Value::Float(if *b { 1.0 } else { 0.0 })),
+                            Value::Int(i) => alloc_float(heap, f64::from(*i)),
+                            Value::Bool(b) => alloc_float(heap, if *b { 1.0 } else { 0.0 }),
                             Value::InternString(string_id) => {
-                                Ok(Value::Float(parse_f64_from_str(interns.get_str(*string_id))?))
+                                alloc_float(heap, parse_f64_from_str(interns.get_str(*string_id))?)
                             }
                             Value::Ref(heap_id) => match heap.get(*heap_id) {
-                                HeapData::Str(s) => Ok(Value::Float(parse_f64_from_str(s.as_str())?)),
+                                HeapData::Float(f) => alloc_float(heap, *f),
+                                HeapData::Str(s) => alloc_float(heap, parse_f64_from_str(s.as_str())?),
+                                HeapData::LongInt(li) => {
+                                    let f = li.to_f64().unwrap_or(if li.is_negative() {
+                                        f64::NEG_INFINITY
+                                    } else {
+                                        f64::INFINITY
+                                    });
+                                    alloc_float(heap, f)
+                                }
                                 _ => Err(ExcType::type_error_float_conversion(v.py_type(heap))),
                             },
                             _ => Err(ExcType::type_error_float_conversion(v.py_type(heap))),
@@ -315,20 +326,20 @@ fn value_error_could_not_convert_string_to_float(value: &str) -> RunError {
 /// Handles whitespace stripping and removing `_` separators. Returns `Value::Int` if the value
 /// fits in i64, otherwise allocates a `LongInt` on the heap. Returns `ValueError` on failure.
 fn parse_int_from_str(value: &str, heap: &mut Heap<impl ResourceTracker>) -> RunResult<Value> {
-    // Try parsing as i64 first (fast path)
+    // Try parsing as i64 first (fast path), then use int_value to handle i32 overflow
     if let Ok(int) = value.parse::<i64>() {
-        return Ok(Value::Int(int));
+        return Ok(crate::value::int_value(int, heap)?);
     }
     let trimmed = value.trim();
 
     if let Ok(int) = trimmed.parse::<i64>() {
-        return Ok(Value::Int(int));
+        return Ok(crate::value::int_value(int, heap)?);
     }
 
     // Try with underscores removed
     let normalized = trimmed.replace('_', "");
     if let Ok(int) = normalized.parse::<i64>() {
-        return Ok(Value::Int(int));
+        return Ok(crate::value::int_value(int, heap)?);
     }
 
     // Try parsing as BigInt for values too large for i64
@@ -348,4 +359,11 @@ fn value_error_invalid_literal_for_int(value: &str) -> RunError {
         format!("invalid literal for int() with base 10: {}", StringRepr(value)),
     )
     .into()
+}
+
+/// Allocates a Float on the heap and returns a `Value::Ref` pointing to it.
+///
+/// This helper is used by the `float()` type constructor since floats are heap-allocated.
+fn alloc_float(heap: &mut Heap<impl ResourceTracker>, f: f64) -> RunResult<Value> {
+    Ok(Value::Ref(heap.allocate(HeapData::Float(f))?))
 }

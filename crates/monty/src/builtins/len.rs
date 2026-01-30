@@ -16,7 +16,10 @@ use crate::{
 pub fn builtin_len(heap: &mut Heap<impl ResourceTracker>, args: ArgValues, interns: &Interns) -> RunResult<Value> {
     let value = args.get_one_arg("len", heap)?;
     let result = match value.py_len(heap, interns) {
-        Some(len) => Ok(Value::Int(i64::try_from(len).expect("len exceeds i64::MAX"))),
+        Some(len) => {
+            let len_i64 = i64::try_from(len).expect("len exceeds i64::MAX");
+            Ok(crate::value::int_value(len_i64, heap)?)
+        }
         None => Err(SimpleException::new_msg(
             ExcType::TypeError,
             format!("object of type {} has no len()", value.py_repr(heap, interns)),

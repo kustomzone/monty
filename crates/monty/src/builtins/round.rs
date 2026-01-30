@@ -3,7 +3,7 @@
 use crate::{
     args::ArgValues,
     exception_private::{ExcType, RunResult, SimpleException},
-    heap::Heap,
+    heap::{Heap, HeapData},
     resource::ResourceTracker,
     types::PyTrait,
     value::Value,
@@ -11,7 +11,7 @@ use crate::{
 
 pub fn normalize_bool_to_int(value: Value) -> Value {
     match value {
-        Value::Bool(b) => Value::Int(i64::from(b)),
+        Value::Bool(b) => Value::Int(i32::from(b)),
         other => other,
     }
 }
@@ -29,7 +29,7 @@ pub fn builtin_round(heap: &mut Heap<impl ResourceTracker>, args: ArgValues) -> 
     // Extract digits value before potentially consuming ndigits for error handling
     let (digits, ndigits_to_drop): (Option<i64>, Option<Value>) = match ndigits {
         Some(Value::None) => (None, Some(Value::None)),
-        Some(Value::Int(n)) => (Some(n), Some(Value::Int(n))),
+        Some(Value::Int(n)) => (Some(i64::from(n)), Some(Value::Int(n))),
         Some(Value::Bool(b)) => (Some(i64::from(b)), Some(Value::Bool(b))),
         Some(v) => {
             let type_name = v.py_type(heap);
@@ -55,31 +55,38 @@ pub fn builtin_round(heap: &mut Heap<impl ResourceTracker>, args: ArgValues) -> 
                     // -d is positive since d < 0; use try_from to safely convert
                     let exp = u32::try_from(-d).unwrap_or(u32::MAX);
                     let factor = 10_i64.saturating_pow(exp);
-                    let rounded_f = bankers_round(*n as f64 / factor as f64);
+                    let rounded_f = bankers_round(f64::from(*n) / factor as f64);
                     let rounded = f64_to_i64(rounded_f) * factor;
-                    Ok(Value::Int(rounded))
+                    Ok(crate::value::int_value(rounded, heap)?)
                 }
             } else {
                 // No digits specified: return the integer unchanged
                 Ok(Value::Int(*n))
             }
         }
-        Value::Float(f) => {
-            if let Some(d) = digits {
-                // Round to `d` decimal places using banker's rounding.
-                Ok(Value::Float(round_float_to_digits(*f, d)))
-            } else {
-                // No digits: round to nearest integer and return int (banker's rounding)
-                if f.is_nan() {
-                    Err(SimpleException::new_msg(ExcType::ValueError, "cannot convert float NaN to integer").into())
-                } else if f.is_infinite() {
-                    Err(
-                        SimpleException::new_msg(ExcType::OverflowError, "cannot convert float infinity to integer")
-                            .into(),
-                    )
+        Value::Ref(id) if matches!(heap.get(*id), HeapData::Float(_)) => {
+            if let HeapData::Float(f) = heap.get(*id) {
+                if let Some(d) = digits {
+                    // Round to `d` decimal places using banker's rounding.
+                    Ok(Value::Ref(
+                        heap.allocate(HeapData::Float(round_float_to_digits(*f, d)))?,
+                    ))
                 } else {
-                    Ok(Value::Int(f64_to_i64(bankers_round(*f))))
+                    // No digits: round to nearest integer and return int (banker's rounding)
+                    if f.is_nan() {
+                        Err(SimpleException::new_msg(ExcType::ValueError, "cannot convert float NaN to integer").into())
+                    } else if f.is_infinite() {
+                        Err(SimpleException::new_msg(
+                            ExcType::OverflowError,
+                            "cannot convert float infinity to integer",
+                        )
+                        .into())
+                    } else {
+                        Ok(crate::value::int_value(f64_to_i64(bankers_round(*f)), heap)?)
+                    }
                 }
+            } else {
+                unreachable!()
             }
         }
         _ => {

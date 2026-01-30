@@ -144,7 +144,7 @@ impl PyTrait for Tuple {
 
         // Extract integer index, accepting both Int and Bool (True=1, False=0)
         let index = match key {
-            Value::Int(i) => *i,
+            Value::Int(i) => i64::from(*i),
             Value::Bool(b) => i64::from(*b),
             _ => return Err(ExcType::type_error_indices(Type::Tuple, key.py_type(heap))),
         };
@@ -257,7 +257,7 @@ fn tuple_index(
         if value.py_eq(item, heap, interns) {
             value.drop_with_heap(heap);
             let idx = i64::try_from(start + i).expect("index exceeds i64::MAX");
-            return Ok(Value::Int(idx));
+            return Ok(crate::value::int_value(idx, heap)?);
         }
     }
 
@@ -284,7 +284,7 @@ fn tuple_count(
 
     value.drop_with_heap(heap);
     let count_i64 = i64::try_from(count).expect("count exceeds i64::MAX");
-    Ok(Value::Int(count_i64))
+    Ok(crate::value::int_value(count_i64, heap)?)
 }
 
 /// Parses arguments for tuple.index() method.

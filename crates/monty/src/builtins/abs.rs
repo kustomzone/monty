@@ -30,19 +30,16 @@ pub fn builtin_abs(heap: &mut Heap<impl ResourceTracker>, args: ArgValues) -> Ru
                 Ok(LongInt::new(bi).into_value(heap)?)
             }
         }
-        Value::Float(f) => Ok(Value::Float(f.abs())),
-        Value::Bool(b) => Ok(Value::Int(i64::from(*b))),
-        Value::Ref(id) => {
-            if let HeapData::LongInt(li) = heap.get(*id) {
-                Ok(li.abs().into_value(heap)?)
-            } else {
-                Err(SimpleException::new_msg(
-                    ExcType::TypeError,
-                    format!("bad operand type for abs(): '{}'", value.py_type(heap)),
-                )
-                .into())
-            }
-        }
+        Value::Bool(b) => Ok(Value::Int(i32::from(*b))),
+        Value::Ref(id) => match heap.get(*id) {
+            HeapData::LongInt(li) => Ok(li.abs().into_value(heap)?),
+            HeapData::Float(f) => Ok(Value::Ref(heap.allocate(HeapData::Float(f.abs()))?)),
+            _ => Err(SimpleException::new_msg(
+                ExcType::TypeError,
+                format!("bad operand type for abs(): '{}'", value.py_type(heap)),
+            )
+            .into()),
+        },
         _ => Err(SimpleException::new_msg(
             ExcType::TypeError,
             format!("bad operand type for abs(): '{}'", value.py_type(heap)),

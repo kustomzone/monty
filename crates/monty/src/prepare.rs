@@ -735,7 +735,7 @@ impl<'i> Prepare<'i> {
         {
             let new_expr = Expr::CmpOp {
                 left: left2.clone(),
-                op: CmpOperator::ModEq(value),
+                op: CmpOperator::ModEq(i64::from(value)),
                 right: right2.clone(),
             };
             return Ok(ExprLoc {
@@ -1647,7 +1647,7 @@ impl<'i> Prepare<'i> {
             } => {
                 let prepared_expr = Box::new(self.prepare_expression(*expr)?);
                 let prepared_spec = match format_spec {
-                    Some(FormatSpec::Static(s)) => Some(FormatSpec::Static(s)),
+                    Some(FormatSpec::Static { parsed, raw_string }) => Some(FormatSpec::Static { parsed, raw_string }),
                     Some(FormatSpec::Dynamic(parts)) => {
                         let prepared = parts
                             .into_iter()

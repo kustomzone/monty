@@ -876,10 +876,11 @@ impl<'a> Parser<'a> {
                 let position = self.convert_range(range);
                 let const_value = match value {
                     Number::Int(i) => {
-                        if let Some(i) = i.as_i64() {
-                            Literal::Int(i)
+                        // Try to fit in i32 first for Value::Int, then fall back to LongInt
+                        if let Some(i32_val) = i.as_i64().and_then(|v| i32::try_from(v).ok()) {
+                            Literal::Int(i32_val)
                         } else {
-                            // Integer too large for i64, parse string representation as BigInt
+                            // Integer too large for i32, parse string representation as BigInt
                             // Handles radix prefixes (0x, 0o, 0b) and underscores
                             let bi = parse_int_literal(&i.to_string())
                                 .ok_or_else(|| ParseError::syntax(format!("invalid integer literal: {i}"), position))?;
@@ -1286,13 +1287,20 @@ impl<'a> Parser<'a> {
                     }
                 })
                 .collect();
-            let parsed = static_spec.parse().map_err(|spec_str| {
+            let parsed: crate::fstring::ParsedFormatSpec = static_spec.parse().map_err(|spec_str| {
                 ParseError::syntax(
                     format!("Invalid format specifier '{spec_str}'"),
                     self.convert_range(spec.range),
                 )
             })?;
-            Ok(FormatSpec::Static(parsed))
+            // For non-ASCII fill chars, store the raw string for runtime parsing
+            // since they can't be compactly encoded in the constant pool
+            let raw_string = if parsed.fill.is_ascii() {
+                None
+            } else {
+                Some(self.interner.intern(&static_spec))
+            };
+            Ok(FormatSpec::Static { parsed, raw_string })
         }
     }
 

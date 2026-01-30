@@ -127,6 +127,15 @@ macro_rules! fetch_i16 {
     }};
 }
 
+/// Fetches an f64 operand (8 bytes, little-endian bits) using cached code/ip.
+macro_rules! fetch_f64 {
+    ($cached_frame:expr) => {{
+        let bytes = &$cached_frame.code.bytecode()[$cached_frame.ip..$cached_frame.ip + 8];
+        $cached_frame.ip += 8;
+        f64::from_bits(u64::from_le_bytes(bytes.try_into().expect("8 bytes for f64")))
+    }};
+}
+
 /// Reloads cached frame state from the current frame.
 ///
 /// Call this after any operation that modifies the frame stack (calls, returns,
@@ -690,7 +699,14 @@ impl<'a, T: ResourceTracker, P: PrintWriter> VM<'a, T, P> {
                 Opcode::LoadFalse => self.push(Value::Bool(false)),
                 Opcode::LoadSmallInt => {
                     let n = fetch_i8!(cached_frame);
-                    self.push(Value::Int(i64::from(n)));
+                    self.push(Value::Int(i32::from(n)));
+                }
+                Opcode::LoadFloat => {
+                    let f = fetch_f64!(cached_frame);
+                    match self.heap.allocate(HeapData::Float(f)) {
+                        Ok(heap_id) => self.push(Value::Ref(heap_id)),
+                        Err(e) => catch_sync!(self, cached_frame, RunError::from(e)),
+                    }
                 }
                 // Variables - Specialized Local Loads (no operand)
                 Opcode::LoadLocal0 => try_catch_sync!(self, cached_frame, self.load_local(&cached_frame, 0)),
@@ -783,34 +799,42 @@ impl<'a, T: ResourceTracker, P: PrintWriter> VM<'a, T, P> {
                     let value = self.pop();
                     match value {
                         Value::Int(n) => {
-                            // Use checked_neg to handle i64::MIN overflow
+                            // Use checked_neg to handle i32::MIN overflow
                             if let Some(negated) = n.checked_neg() {
                                 self.push(Value::Int(negated));
                             } else {
-                                // i64::MIN negated overflows to LongInt
-                                let li = -LongInt::from(n);
+                                // i32::MIN negated overflows to LongInt
+                                let li = -LongInt::from(i64::from(n));
                                 match li.into_value(self.heap) {
                                     Ok(v) => self.push(v),
                                     Err(e) => catch_sync!(self, cached_frame, RunError::from(e)),
                                 }
                             }
                         }
-                        Value::Float(f) => self.push(Value::Float(-f)),
                         Value::Bool(b) => self.push(Value::Int(if b { -1 } else { 0 })),
-                        Value::Ref(id) => {
-                            if let HeapData::LongInt(li) = self.heap.get(id) {
+                        Value::Ref(id) => match self.heap.get(id) {
+                            HeapData::Float(f) => {
+                                let negated = -f;
+                                value.drop_with_heap(self.heap);
+                                match self.heap.allocate(HeapData::Float(negated)) {
+                                    Ok(heap_id) => self.push(Value::Ref(heap_id)),
+                                    Err(e) => catch_sync!(self, cached_frame, RunError::from(e)),
+                                }
+                            }
+                            HeapData::LongInt(li) => {
                                 let negated = -LongInt::new(li.inner().clone());
                                 value.drop_with_heap(self.heap);
                                 match negated.into_value(self.heap) {
                                     Ok(v) => self.push(v),
                                     Err(e) => catch_sync!(self, cached_frame, RunError::from(e)),
                                 }
-                            } else {
+                            }
+                            _ => {
                                 let value_type = value.py_type(self.heap);
                                 value.drop_with_heap(self.heap);
                                 catch_sync!(self, cached_frame, ExcType::unary_type_error("-", value_type));
                             }
-                        }
+                        },
                         _ => {
                             let value_type = value.py_type(self.heap);
                             value.drop_with_heap(self.heap);
@@ -822,11 +846,11 @@ impl<'a, T: ResourceTracker, P: PrintWriter> VM<'a, T, P> {
                     // Unary plus - converts bools to int, no-op for other numbers
                     let value = self.pop();
                     match value {
-                        Value::Int(_) | Value::Float(_) => self.push(value),
-                        Value::Bool(b) => self.push(Value::Int(i64::from(b))),
+                        Value::Int(_) => self.push(value),
+                        Value::Bool(b) => self.push(Value::Int(i32::from(b))),
                         Value::Ref(id) => {
-                            if matches!(self.heap.get(id), HeapData::LongInt(_)) {
-                                // LongInt - return as-is (value already has correct refcount)
+                            if matches!(self.heap.get(id), HeapData::LongInt(_) | HeapData::Float(_)) {
+                                // LongInt or Float - return as-is (value already has correct refcount)
                                 self.push(value);
                             } else {
                                 let value_type = value.py_type(self.heap);
@@ -846,7 +870,7 @@ impl<'a, T: ResourceTracker, P: PrintWriter> VM<'a, T, P> {
                     let value = self.pop();
                     match value {
                         Value::Int(n) => self.push(Value::Int(!n)),
-                        Value::Bool(b) => self.push(Value::Int(!i64::from(b))),
+                        Value::Bool(b) => self.push(Value::Int(!i32::from(b))),
                         Value::Ref(id) => {
                             if let HeapData::LongInt(li) = self.heap.get(id) {
                                 // LongInt bitwise NOT: ~x = -(x + 1)

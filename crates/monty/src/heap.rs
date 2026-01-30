@@ -104,6 +104,12 @@ pub(crate) enum HeapData {
     /// when values fit, and promote to LongInt on overflow. When LongInt results fit back
     /// in i64, they are demoted back to `Value::Int` for performance.
     LongInt(LongInt),
+    /// A floating-point number.
+    ///
+    /// Stored on the heap to keep `Value` enum small. Float operations allocate
+    /// new heap values for results, similar to how Python's immutable floats work.
+    /// Floats are immutable and hashable (using bit representation).
+    Float(f64),
     /// A Python module (e.g., `sys`, `typing`).
     ///
     /// Modules have a name and a dictionary of attributes. They are created by
@@ -191,9 +197,13 @@ impl HeapData {
                         .any(|r| r.as_ref().is_some_and(|v| matches!(v, Value::Ref(_))))
             }
             // Leaf types cannot have refs
-            Self::Str(_) | Self::Bytes(_) | Self::Range(_) | Self::Slice(_) | Self::Exception(_) | Self::LongInt(_) => {
-                false
-            }
+            Self::Str(_)
+            | Self::Bytes(_)
+            | Self::Range(_)
+            | Self::Slice(_)
+            | Self::Exception(_)
+            | Self::LongInt(_)
+            | Self::Float(_) => false,
         }
     }
 
@@ -287,6 +297,13 @@ impl HeapData {
             | Self::GatherFuture(_) => None,
             // LongInt is immutable and hashable
             Self::LongInt(li) => Some(li.hash()),
+            // Float is immutable and hashable (using bit representation)
+            Self::Float(f) => {
+                let mut hasher = DefaultHasher::new();
+                discriminant(self).hash(&mut hasher);
+                f.to_bits().hash(&mut hasher);
+                Some(hasher.finish())
+            }
         }
     }
 }
@@ -315,6 +332,7 @@ impl PyTrait for HeapData {
             Self::Iter(_) => Type::Iterator,
             // LongInt is still `int` in Python - it's an implementation detail
             Self::LongInt(_) => Type::Int,
+            Self::Float(_) => Type::Float,
             Self::Module(_) => Type::Module,
             Self::Coroutine(_) | Self::GatherFuture(_) => Type::Coroutine,
         }
@@ -339,6 +357,7 @@ impl PyTrait for HeapData {
             Self::Dataclass(dc) => dc.py_estimate_size(),
             Self::Iter(_) => std::mem::size_of::<MontyIter>(),
             Self::LongInt(li) => li.estimate_size(),
+            Self::Float(_) => std::mem::size_of::<f64>(),
             Self::Module(m) => std::mem::size_of::<Module>() + m.attrs().py_estimate_size(),
             Self::Coroutine(coro) => {
                 std::mem::size_of::<Coroutine>()
@@ -365,7 +384,7 @@ impl PyTrait for HeapData {
             Self::Set(s) => PyTrait::py_len(s, heap, interns),
             Self::FrozenSet(fs) => PyTrait::py_len(fs, heap, interns),
             Self::Range(r) => Some(r.len()),
-            // Cells, Slices, Exceptions, Dataclasses, Iterators, LongInts, Modules, and async types don't have length
+            // Cells, Slices, Exceptions, Dataclasses, Iterators, LongInts, Floats, Modules, and async types don't have length
             Self::Cell(_)
             | Self::Closure(_, _, _)
             | Self::FunctionDefaults(_, _)
@@ -374,6 +393,7 @@ impl PyTrait for HeapData {
             | Self::Dataclass(_)
             | Self::Iter(_)
             | Self::LongInt(_)
+            | Self::Float(_)
             | Self::Module(_)
             | Self::Coroutine(_)
             | Self::GatherFuture(_) => None,
@@ -408,6 +428,8 @@ impl PyTrait for HeapData {
             (Self::Dataclass(a), Self::Dataclass(b)) => a.py_eq(b, heap, interns),
             // LongInt equality
             (Self::LongInt(a), Self::LongInt(b)) => a == b,
+            // Float equality
+            (Self::Float(a), Self::Float(b)) => a == b,
             // Slice equality
             (Self::Slice(a), Self::Slice(b)) => a.py_eq(b, heap, interns),
             // Cells, Exceptions, Iterators, Modules, and async types compare by identity only (handled at Value level via HeapId comparison)
@@ -469,8 +491,8 @@ impl PyTrait for HeapData {
                     result.py_dec_ref_ids(stack);
                 }
             }
-            // Range, Slice, Exception, and LongInt have no nested heap references
-            Self::Range(_) | Self::Slice(_) | Self::Exception(_) | Self::LongInt(_) => {}
+            // Range, Slice, Exception, LongInt, and Float have no nested heap references
+            Self::Range(_) | Self::Slice(_) | Self::Exception(_) | Self::LongInt(_) | Self::Float(_) => {}
         }
     }
 
@@ -492,6 +514,7 @@ impl PyTrait for HeapData {
             Self::Dataclass(dc) => dc.py_bool(heap, interns),
             Self::Iter(_) => true, // Iterators are always truthy
             Self::LongInt(li) => !li.is_zero(),
+            Self::Float(f) => *f != 0.0,
             Self::Module(_) => true,       // Modules are always truthy
             Self::Coroutine(_) => true,    // Coroutines are always truthy
             Self::GatherFuture(_) => true, // GatherFutures are always truthy
@@ -525,6 +548,14 @@ impl PyTrait for HeapData {
             Self::Dataclass(dc) => dc.py_repr_fmt(f, heap, heap_ids, interns),
             Self::Iter(_) => write!(f, "<iterator>"),
             Self::LongInt(li) => write!(f, "{li}"),
+            Self::Float(v) => {
+                let s = v.to_string();
+                if s.contains('.') {
+                    f.write_str(&s)
+                } else {
+                    write!(f, "{s}.0")
+                }
+            }
             Self::Module(m) => write!(f, "<module '{}'>", interns.get_str(m.name())),
             Self::Coroutine(coro) => {
                 let func = interns.get_function(coro.func_id);
@@ -541,6 +572,15 @@ impl PyTrait for HeapData {
             Self::Str(s) => s.py_str(heap, interns),
             // LongInt returns its string representation
             Self::LongInt(li) => Cow::Owned(li.to_string()),
+            // Float returns its string representation
+            Self::Float(f) => {
+                let s = f.to_string();
+                if s.contains('.') {
+                    Cow::Owned(s)
+                } else {
+                    Cow::Owned(format!("{s}.0"))
+                }
+            }
             // Exceptions return just the message (or empty string if no message)
             Self::Exception(e) => Cow::Owned(e.arg().cloned().unwrap_or_default()),
             // All other types use repr
@@ -604,18 +644,6 @@ impl PyTrait for HeapData {
             }
             // Cells don't support arithmetic operations
             _ => Ok(None),
-        }
-    }
-
-    fn py_mod_eq(&self, other: &Self, right_value: i64) -> Option<bool> {
-        match (self, other) {
-            (Self::Str(a), Self::Str(b)) => a.py_mod_eq(b, right_value),
-            (Self::Bytes(a), Self::Bytes(b)) => a.py_mod_eq(b, right_value),
-            (Self::List(a), Self::List(b)) => a.py_mod_eq(b, right_value),
-            (Self::Tuple(a), Self::Tuple(b)) => a.py_mod_eq(b, right_value),
-            (Self::Dict(a), Self::Dict(b)) => a.py_mod_eq(b, right_value),
-            // Cells don't support arithmetic operations
-            _ => None,
         }
     }
 
@@ -712,6 +740,7 @@ impl HashState {
             // Slice is immutable and hashable (like in CPython)
             // LongInt is immutable and hashable
             // NamedTuple is immutable and hashable (like Tuple)
+            // Float is immutable and hashable
             HeapData::Str(_)
             | HeapData::Bytes(_)
             | HeapData::Tuple(_)
@@ -722,7 +751,8 @@ impl HashState {
             | HeapData::FunctionDefaults(_, _)
             | HeapData::Range(_)
             | HeapData::Slice(_)
-            | HeapData::LongInt(_) => Self::Unknown,
+            | HeapData::LongInt(_)
+            | HeapData::Float(_) => Self::Unknown,
             // Dataclass hashability depends on the mutable flag
             HeapData::Dataclass(dc) => {
                 if dc.is_frozen() {
@@ -1454,6 +1484,7 @@ fn collect_child_ids(data: &HeapData, work_list: &mut Vec<HeapId>) {
         | HeapData::Range(_)
         | HeapData::Exception(_)
         | HeapData::LongInt(_)
+        | HeapData::Float(_)
         | HeapData::Slice(_) => {}
         HeapData::List(list) => {
             // Skip iteration if no refs - major GC optimization for lists of primitives

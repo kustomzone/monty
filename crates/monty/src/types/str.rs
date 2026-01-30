@@ -230,7 +230,7 @@ impl PyTrait for Str {
 
         // Extract integer index, accepting both Int and Bool (True=1, False=0)
         let index = match key {
-            Value::Int(i) => *i,
+            Value::Int(i) => i64::from(*i),
             Value::Bool(b) => i64::from(*b),
             _ => return Err(ExcType::type_error_indices(Type::Str, key.py_type(heap))),
         };
@@ -956,7 +956,7 @@ fn str_find(s: &str, args: ArgValues, heap: &mut Heap<impl ResourceTracker>, int
         }
         None => -1,
     };
-    Ok(Value::Int(result))
+    Ok(crate::value::int_value(result, heap)?)
 }
 
 /// Implements Python's `str.rfind(sub, start?, end?)` method.
@@ -974,7 +974,7 @@ fn str_rfind(s: &str, args: ArgValues, heap: &mut Heap<impl ResourceTracker>, in
         }
         None => -1,
     };
-    Ok(Value::Int(result))
+    Ok(crate::value::int_value(result, heap)?)
 }
 
 /// Implements Python's `str.index(sub, start?, end?)` method.
@@ -987,7 +987,7 @@ fn str_index(s: &str, args: ArgValues, heap: &mut Heap<impl ResourceTracker>, in
         Some(pos) => {
             let char_pos = slice[..pos].chars().count();
             let result = i64::try_from(start + char_pos).unwrap_or(i64::MAX);
-            Ok(Value::Int(result))
+            Ok(crate::value::int_value(result, heap)?)
         }
         None => Err(ExcType::value_error_substring_not_found()),
     }
@@ -1003,7 +1003,7 @@ fn str_rindex(s: &str, args: ArgValues, heap: &mut Heap<impl ResourceTracker>, i
         Some(pos) => {
             let char_pos = slice[..pos].chars().count();
             let result = i64::try_from(start + char_pos).unwrap_or(i64::MAX);
-            Ok(Value::Int(result))
+            Ok(crate::value::int_value(result, heap)?)
         }
         None => Err(ExcType::value_error_substring_not_found()),
     }
@@ -1023,7 +1023,7 @@ fn str_count(s: &str, args: ArgValues, heap: &mut Heap<impl ResourceTracker>, in
         slice.matches(&sub).count()
     };
     let result = i64::try_from(count).unwrap_or(i64::MAX);
-    Ok(Value::Int(result))
+    Ok(crate::value::int_value(result, heap)?)
 }
 
 /// Implements Python's `str.startswith(prefix, start?, end?)` method.
@@ -1255,7 +1255,7 @@ fn extract_string_arg(value: &Value, heap: &Heap<impl ResourceTracker>, interns:
 /// Extracts an integer from a Value, returning an error if not an integer.
 fn extract_int_arg(value: &Value, heap: &Heap<impl ResourceTracker>) -> RunResult<i64> {
     match value {
-        Value::Int(i) => Ok(*i),
+        Value::Int(i) => Ok(i64::from(*i)),
         Value::Ref(heap_id) => {
             if let HeapData::LongInt(li) = heap.get(*heap_id) {
                 // Try to convert to i64

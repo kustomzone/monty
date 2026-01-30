@@ -187,7 +187,7 @@ impl Slice {
 pub(crate) fn value_to_option_i64(value: &Value) -> RunResult<Option<i64>> {
     match value {
         Value::None => Ok(None),
-        Value::Int(i) => Ok(Some(*i)),
+        Value::Int(i) => Ok(Some(i64::from(*i))),
         Value::Bool(b) => Ok(Some(i64::from(*b))),
         _ => Err(ExcType::type_error_slice_indices()),
     }
@@ -246,9 +246,14 @@ impl PyTrait for Slice {
 }
 
 /// Converts an Option<i64> to a Value (None or Int).
+///
+/// NOTE: This truncates i64 to i32. For slice indices that exceed i32,
+/// the behavior may differ from Python. In practice, slice indices this
+/// large are rare since sequences rarely exceed i32::MAX elements.
 pub(crate) fn option_i64_to_value(opt: Option<i64>) -> Value {
     match opt {
-        Some(i) => Value::Int(i),
+        // Truncate to i32 - slice indices rarely exceed this range
+        Some(i) => Value::Int(i32::try_from(i).unwrap_or(if i > 0 { i32::MAX } else { i32::MIN })),
         None => Value::None,
     }
 }

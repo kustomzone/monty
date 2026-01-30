@@ -7,10 +7,15 @@ use crate::{
     args::ArgValues,
     exception_private::{ExcType, RunError, RunResult, SimpleException},
     heap::{Heap, HeapData},
-    resource::{LARGE_RESULT_THRESHOLD, ResourceTracker},
+    resource::{LARGE_RESULT_THRESHOLD, ResourceError, ResourceTracker},
     types::{LongInt, PyTrait},
     value::Value,
 };
+
+/// Helper to allocate a float on the heap.
+fn alloc_float(heap: &mut Heap<impl ResourceTracker>, f: f64) -> Result<Value, ResourceError> {
+    Ok(Value::Ref(heap.allocate(HeapData::Float(f))?))
+}
 
 /// Implementation of the pow() builtin function.
 ///
@@ -68,11 +73,11 @@ pub fn builtin_pow(heap: &mut Heap<impl ResourceTracker>, args: ArgValues) -> Ru
                 } else {
                     // Use modular exponentiation
                     let result = mod_pow(
-                        *b,
+                        i64::from(*b),
                         u64::try_from(*e).expect("pow exponent >= 0 but failed u64 conversion"),
-                        *m_val,
+                        i64::from(*m_val),
                     );
-                    Ok(Value::Int(result))
+                    Ok(crate::value::int_value(result, heap)?)
                 }
             }
             _ => Err(SimpleException::new_msg(
@@ -83,7 +88,7 @@ pub fn builtin_pow(heap: &mut Heap<impl ResourceTracker>, args: ArgValues) -> Ru
         }
     } else {
         // Two-argument pow
-        Ok(two_arg_pow(&base, &exp, heap)?)
+        two_arg_pow(&base, &exp, heap)
     };
 
     base.drop_with_heap(heap);
@@ -146,78 +151,82 @@ fn checked_pow_i64(mut base: i64, mut exp: u32) -> Option<i64> {
 /// On overflow, promotes to LongInt instead of returning an error.
 fn two_arg_pow(base: &Value, exp: &Value, heap: &mut Heap<impl ResourceTracker>) -> RunResult<Value> {
     match (base, exp) {
-        (Value::Int(b), Value::Int(e)) => int_pow_int(*b, *e, heap),
-        (Value::Int(b), Value::Ref(id)) => {
-            // Clone to avoid borrow conflict with heap mutation
-            let e_bi = if let HeapData::LongInt(li) = heap.get(*id) {
-                li.inner().clone()
-            } else {
-                return Err(ExcType::binary_type_error(
-                    "** or pow()",
-                    base.py_type(heap),
-                    exp.py_type(heap),
-                ));
-            };
-            int_pow_longint(*b, &e_bi, heap)
-        }
-        (Value::Ref(id), Value::Int(e)) => {
-            // Clone to avoid borrow conflict with heap mutation
-            let b_bi = if let HeapData::LongInt(li) = heap.get(*id) {
-                li.inner().clone()
-            } else {
-                return Err(ExcType::binary_type_error(
-                    "** or pow()",
-                    base.py_type(heap),
-                    exp.py_type(heap),
-                ));
-            };
-            longint_pow_int(&b_bi, *e, heap)
-        }
-        (Value::Ref(id1), Value::Ref(id2)) => {
-            // Clone both to avoid borrow conflict with heap mutation
-            let b_bi = if let HeapData::LongInt(li) = heap.get(*id1) {
-                li.inner().clone()
-            } else {
-                return Err(ExcType::binary_type_error(
-                    "** or pow()",
-                    base.py_type(heap),
-                    exp.py_type(heap),
-                ));
-            };
-            let e_bi = if let HeapData::LongInt(li) = heap.get(*id2) {
-                li.inner().clone()
-            } else {
-                return Err(ExcType::binary_type_error(
-                    "** or pow()",
-                    base.py_type(heap),
-                    exp.py_type(heap),
-                ));
-            };
-            longint_pow_longint(&b_bi, &e_bi, heap)
-        }
-        (Value::Float(b), Value::Float(e)) => {
-            if *b == 0.0 && *e < 0.0 {
-                Err(ExcType::zero_negative_power())
-            } else {
-                Ok(Value::Float(b.powf(*e)))
+        (Value::Int(b), Value::Int(e)) => int_pow_int(i64::from(*b), i64::from(*e), heap),
+        // Int ** LongInt or Int ** Float
+        (Value::Int(b), Value::Ref(id)) => match heap.get(*id) {
+            HeapData::LongInt(li) => {
+                let e_bi = li.inner().clone();
+                int_pow_longint(i64::from(*b), &e_bi, heap)
             }
-        }
-        (Value::Int(b), Value::Float(e)) => {
-            if *b == 0 && *e < 0.0 {
-                Err(ExcType::zero_negative_power())
-            } else {
-                Ok(Value::Float((*b as f64).powf(*e)))
+            HeapData::Float(e) => {
+                if *b == 0 && *e < 0.0 {
+                    Err(ExcType::zero_negative_power())
+                } else {
+                    Ok(alloc_float(heap, f64::from(*b).powf(*e))?)
+                }
             }
-        }
-        (Value::Float(b), Value::Int(e)) => {
-            if *b == 0.0 && *e < 0 {
-                Err(ExcType::zero_negative_power())
-            } else if let Ok(exp_i32) = i32::try_from(*e) {
-                Ok(Value::Float(b.powi(exp_i32)))
-            } else {
-                Ok(Value::Float(b.powf(*e as f64)))
+            _ => Err(ExcType::binary_type_error(
+                "** or pow()",
+                base.py_type(heap),
+                exp.py_type(heap),
+            )),
+        },
+        // LongInt ** Int or Float ** Int
+        (Value::Ref(id), Value::Int(e)) => match heap.get(*id) {
+            HeapData::LongInt(li) => {
+                let b_bi = li.inner().clone();
+                longint_pow_int(&b_bi, i64::from(*e), heap)
             }
-        }
+            HeapData::Float(b) => {
+                if *b == 0.0 && *e < 0 {
+                    Err(ExcType::zero_negative_power())
+                } else {
+                    // i32 always fits in i32, so powi is always valid
+                    Ok(alloc_float(heap, b.powi(*e))?)
+                }
+            }
+            _ => Err(ExcType::binary_type_error(
+                "** or pow()",
+                base.py_type(heap),
+                exp.py_type(heap),
+            )),
+        },
+        // Ref ** Ref: LongInt/LongInt, Float/Float, Float/LongInt, LongInt/Float
+        (Value::Ref(id1), Value::Ref(id2)) => match (heap.get(*id1), heap.get(*id2)) {
+            (HeapData::LongInt(li1), HeapData::LongInt(li2)) => {
+                let b_bi = li1.inner().clone();
+                let e_bi = li2.inner().clone();
+                longint_pow_longint(&b_bi, &e_bi, heap)
+            }
+            (HeapData::Float(b), HeapData::Float(e)) => {
+                if *b == 0.0 && *e < 0.0 {
+                    Err(ExcType::zero_negative_power())
+                } else {
+                    Ok(alloc_float(heap, b.powf(*e))?)
+                }
+            }
+            (HeapData::Float(b), HeapData::LongInt(li)) => {
+                let e = li.to_f64().unwrap_or(f64::INFINITY);
+                if *b == 0.0 && e < 0.0 {
+                    Err(ExcType::zero_negative_power())
+                } else {
+                    Ok(alloc_float(heap, b.powf(e))?)
+                }
+            }
+            (HeapData::LongInt(li), HeapData::Float(e)) => {
+                let b = li.to_f64().unwrap_or(f64::INFINITY);
+                if b == 0.0 && *e < 0.0 {
+                    Err(ExcType::zero_negative_power())
+                } else {
+                    Ok(alloc_float(heap, b.powf(*e))?)
+                }
+            }
+            _ => Err(ExcType::binary_type_error(
+                "** or pow()",
+                base.py_type(heap),
+                exp.py_type(heap),
+            )),
+        },
         _ => Err(ExcType::binary_type_error(
             "** or pow()",
             base.py_type(heap),
@@ -233,10 +242,11 @@ fn int_pow_int(b: i64, e: i64, heap: &mut Heap<impl ResourceTracker>) -> RunResu
         if b == 0 {
             return Err(ExcType::zero_negative_power());
         }
-        Ok(Value::Float((b as f64).powf(e as f64)))
+        Ok(alloc_float(heap, (b as f64).powf(e as f64))?)
     } else if let Ok(exp_u32) = u32::try_from(e) {
         if let Some(v) = checked_pow_i64(b, exp_u32) {
-            Ok(Value::Int(v))
+            // Use int_value to handle potential i32 overflow
+            Ok(crate::value::int_value(v, heap)?)
         } else {
             // Overflow - promote to LongInt
             // Check size before computing to prevent DoS
@@ -265,9 +275,9 @@ fn int_pow_longint(b: i64, e: &BigInt, heap: &mut Heap<impl ResourceTracker>) ->
     if e.is_negative() {
         // Negative LongInt exponent: return float
         if let Some(e_f64) = e.to_f64() {
-            Ok(Value::Float((b as f64).powf(e_f64)))
+            Ok(alloc_float(heap, (b as f64).powf(e_f64))?)
         } else {
-            Ok(Value::Float(0.0))
+            Ok(alloc_float(heap, 0.0)?)
         }
     } else if e.is_zero() {
         // x ** 0 = 1 for all x (including 0 ** 0 = 1)
@@ -299,9 +309,9 @@ fn longint_pow_int(b: &BigInt, e: i64, heap: &mut Heap<impl ResourceTracker>) ->
     if e < 0 {
         // Negative exponent: return float
         if let (Some(b_f64), Some(e_f64)) = (b.to_f64(), Some(e as f64)) {
-            Ok(Value::Float(b_f64.powf(e_f64)))
+            Ok(alloc_float(heap, b_f64.powf(e_f64))?)
         } else {
-            Ok(Value::Float(0.0))
+            Ok(alloc_float(heap, 0.0)?)
         }
     } else if let Ok(exp_u32) = u32::try_from(e) {
         // Check size before computing to prevent DoS
@@ -328,9 +338,9 @@ fn longint_pow_longint(b: &BigInt, e: &BigInt, heap: &mut Heap<impl ResourceTrac
     if e.is_negative() {
         // Negative exponent: return float
         if let (Some(b_f64), Some(e_f64)) = (b.to_f64(), e.to_f64()) {
-            Ok(Value::Float(b_f64.powf(e_f64)))
+            Ok(alloc_float(heap, b_f64.powf(e_f64))?)
         } else {
-            Ok(Value::Float(0.0))
+            Ok(alloc_float(heap, 0.0)?)
         }
     } else if let Some(exp_u32) = e.to_u32() {
         // Check size before computing to prevent DoS
