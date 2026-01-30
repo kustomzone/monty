@@ -6,7 +6,7 @@ use std::{
 use ahash::AHashSet;
 use indexmap::IndexMap;
 use num_bigint::BigInt;
-use num_traits::Zero;
+use num_traits::{ToPrimitive, Zero};
 
 use crate::{
     builtins::{Builtins, BuiltinsFunctions},
@@ -814,21 +814,25 @@ impl From<crate::resource::ResourceError> for InvalidInputError {
 }
 
 /// Attempts to convert a MontyObject to an i64 integer.
-/// Returns an error if the object is not an Int variant.
+/// Returns an error if the object is not an Int or BigInt variant.
+/// BigInt values that don't fit in i64 return an overflow error.
 impl TryFrom<&MontyObject> for i64 {
     type Error = ConversionError;
 
     fn try_from(value: &MontyObject) -> Result<Self, Self::Error> {
         match value {
             MontyObject::Int(i) => Ok(*i),
+            MontyObject::BigInt(bi) => bi
+                .to_i64()
+                .ok_or_else(|| ConversionError::new("int (fits in i64)", "int (BigInt overflow)")),
             _ => Err(ConversionError::new("int", value.type_name())),
         }
     }
 }
 
 /// Attempts to convert a MontyObject to an f64 float.
-/// Returns an error if the object is not a Float or Int variant.
-/// Int values are automatically converted to f64 to match python's behavior.
+/// Returns an error if the object is not a Float, Int, or BigInt variant.
+/// Int and BigInt values are automatically converted to f64 to match python's behavior.
 impl TryFrom<&MontyObject> for f64 {
     type Error = ConversionError;
 
@@ -836,6 +840,7 @@ impl TryFrom<&MontyObject> for f64 {
         match value {
             MontyObject::Float(f) => Ok(*f),
             MontyObject::Int(i) => Ok(*i as Self),
+            MontyObject::BigInt(bi) => Ok(bi.to_f64().unwrap_or(Self::INFINITY)),
             _ => Err(ConversionError::new("float", value.type_name())),
         }
     }
