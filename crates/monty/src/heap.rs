@@ -3,7 +3,7 @@ use std::{
     collections::hash_map::DefaultHasher,
     fmt::Write,
     hash::{Hash, Hasher},
-    mem::discriminant,
+    mem::{MaybeUninit, discriminant},
 };
 
 use ahash::AHashSet;
@@ -1617,4 +1617,56 @@ impl<T: ResourceTracker> Drop for Heap<T> {
             }
         }
     }
+}
+
+/// Guard that contains a `Value` and drops it from the heap when dropped.
+pub struct HeapGuard<'a, T: ResourceTracker> {
+    // uninitialized only during Drop implementation
+    value: MaybeUninit<Value>,
+    heap: &'a mut Heap<T>,
+}
+
+impl<'a, T: ResourceTracker> HeapGuard<'a, T> {
+    /// Creates a new `HeapGuard` for the given value and heap.
+    #[inline]
+    pub fn new(value: Value, heap: &'a mut Heap<T>) -> Self {
+        Self {
+            value: MaybeUninit::new(value),
+            heap,
+        }
+    }
+
+    /// Consumes the guard and returns the contained value without dropping it.
+    #[inline]
+    #[expect(dead_code, reason = "expected to be used in future")]
+    pub fn into_value(self) -> Value {
+        // SAFETY: value is initialized except during Drop, which `forget` prevents
+        let value = unsafe { self.value.as_ptr().read() };
+        std::mem::forget(self);
+        value
+    }
+
+    /// Borrows the guard as its constituent parts
+    #[inline]
+    pub fn as_parts(&mut self) -> (&mut Value, &mut Heap<T>) {
+        // SAFETY: value is initialized except during Drop, which is not happening here
+        let value = unsafe { self.value.assume_init_mut() };
+        (value, self.heap)
+    }
+}
+
+impl<T: ResourceTracker> Drop for HeapGuard<'_, T> {
+    fn drop(&mut self) {
+        // SAFETY: value is initialized until this read
+        unsafe { self.value.as_ptr().read() }.drop_with_heap(self.heap);
+    }
+}
+
+/// Helper macro to create a `HeapGuard` and immediately borrow the value out of it.
+#[macro_export]
+macro_rules! defer_drop {
+    ($value:ident, $heap:ident) => {
+        let mut guard = $crate::heap::HeapGuard::new($value, $heap);
+        let ($value, $heap) = guard.as_parts();
+    };
 }
