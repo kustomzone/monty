@@ -1663,10 +1663,14 @@ impl<T: ResourceTracker> Drop for HeapGuard<'_, T> {
 }
 
 /// Helper macro to create a `HeapGuard` and immediately borrow the value out of it.
+///
+/// After this macro, both `$value` and `$heap` are reborrowed from the guard
+/// and can be used normally. The value will be automatically dropped when
+/// the guard goes out of scope.
 #[macro_export]
 macro_rules! defer_drop {
     ($value:ident, $heap:ident) => {
-        let mut guard = $crate::heap::HeapGuard::new($value, $heap);
-        let ($value, $heap) = guard.as_parts();
+        let mut _guard = $crate::heap::HeapGuard::new($value, $heap);
+        let ($value, $heap) = _guard.as_parts();
     };
 }
