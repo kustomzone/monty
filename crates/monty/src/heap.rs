@@ -1209,10 +1209,19 @@ impl<T: ResourceTracker> Heap<T> {
     ///
     /// This is primarily used for testing to verify that all heap entries
     /// are accounted for in reference count tests.
+    ///
+    /// Excludes the empty tuple singleton since it's an internal optimization
+    /// detail that persists even when not explicitly used by user code.
     #[must_use]
     #[cfg(feature = "ref-count-return")]
     pub fn entry_count(&self) -> usize {
-        self.entries.iter().filter(|o| o.is_some()).count()
+        let count = self.entries.iter().filter(|o| o.is_some()).count();
+        // Subtract 1 for the empty tuple singleton if it exists
+        if self.empty_tuple_id.is_some() {
+            count.saturating_sub(1)
+        } else {
+            count
+        }
     }
 
     /// Gets the value inside a cell, cloning it with proper refcount handling.
