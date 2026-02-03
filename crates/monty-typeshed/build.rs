@@ -6,7 +6,7 @@
 //! in `crates/ty_vendored/vendor/typeshed` change.
 #![expect(clippy::unnecessary_debug_formatting)]
 
-use std::{fs::File, io::Write, path::Path};
+use std::{fs::File, io::Write, path::Path, process::Command};
 
 use path_slash::PathExt;
 use zip::{
@@ -84,7 +84,38 @@ fn write_zipped_typeshed_to(writer: File) -> ZipResult<File> {
     zip.finish()
 }
 
+/// Run the update.py script and ruff to update and format vendored typeshed files.
+///
+/// This mirrors the `update-typeshed` Makefile target.
+fn run_update_script() {
+    let manifest_dir = std::env::var("CARGO_MANIFEST_DIR").unwrap();
+    let update_script = Path::new(&manifest_dir).join("update.py");
+
+    println!("Running update.py to update vendored typeshed...");
+    let status = Command::new("uv")
+        .args(["run", update_script.to_str().unwrap()])
+        .status()
+        .expect("Failed to run update.py");
+    assert!(status.success(), "update.py failed");
+
+    println!("Running ruff format...");
+    let status = Command::new("uv")
+        .args(["run", "ruff", "format"])
+        .status()
+        .expect("Failed to run ruff format");
+    assert!(status.success(), "ruff format failed");
+
+    println!("Running ruff check --fix...");
+    let status = Command::new("uv")
+        .args(["run", "ruff", "check", "--fix", "--fix-only", "--silent"])
+        .status()
+        .expect("Failed to run ruff check");
+    assert!(status.success(), "ruff check failed");
+}
+
 fn main() {
+    run_update_script();
+
     assert!(Path::new(TYPESHED_SOURCE_DIR).is_dir(), "Where is typeshed?");
     let out_dir = std::env::var("OUT_DIR").unwrap();
 

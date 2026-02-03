@@ -14,3 +14,5 @@
 /type-sizes.txt
 /sandbox/
 /starlark-rust/
+# this is build on package build
+crates/monty-typeshed/vendor/

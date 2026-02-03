@@ -14,6 +14,7 @@ Usage:
 import ast
 import shutil
 import subprocess
+import sys
 from pathlib import Path
 
 # Whitelisted builtin functions (from crates/monty/src/builtins/)
@@ -144,43 +145,58 @@ CUSTOM_DIR = SCRIPT_DIR / 'custom'
 TYPESHED_REPO_DIR = SCRIPT_DIR / 'typeshed-repo'
 
 TYPESHED_REPO_URL = 'git@github.com:python/typeshed.git'
+# Specific commit to vendor from typeshed
+TYPESHED_COMMIT = '7f3ec0016092743c1d6738e61bed560614d4def8'
+
+
+def run_command(*args: str, cwd: Path | None = None) -> subprocess.CompletedProcess[bytes]:
+    """Run a command and print output on error.
+
+    Args:
+        args: Command and arguments to run.
+        cwd: Optional working directory.
+
+    Returns:
+        The completed process on success.
+
+    Raises:
+        SystemExit: If the command fails.
+    """
+    result = subprocess.run(args, cwd=cwd, capture_output=True)
+    if result.returncode != 0:
+        cmd_str = ' '.join(args)
+        print(f'Command failed: {cmd_str}', file=sys.stderr)
+        print(f'Exit code: {result.returncode}', file=sys.stderr)
+        if result.stdout:
+            print(f'stdout:\n{result.stdout.decode()}', file=sys.stderr)
+        if result.stderr:
+            print(f'stderr:\n{result.stderr.decode()}', file=sys.stderr)
+        raise SystemExit(1)
+    return result
 
 
 def clone_or_update_typeshed() -> tuple[Path, str]:
-    """Clone or update the typeshed repository and return the path and HEAD commit hash.
+    """Clone the typeshed repository and checkout the pinned commit.
 
-    If the repository already exists at TYPESHED_REPO_DIR, performs a git pull.
-    Otherwise, clones the repository to that location.
+    If the repository already exists at TYPESHED_REPO_DIR, fetches and checks out TYPESHED_COMMIT.
+    Otherwise, does a shallow clone and fetches the specific commit.
 
     Returns:
         Tuple of (repo_path, commit_hash).
     """
     if TYPESHED_REPO_DIR.exists():
-        print(f'{TYPESHED_REPO_DIR} exists, not pulling')
-        # subprocess.run(
-        #     ['git', 'pull'],
-        #     cwd=TYPESHED_REPO_DIR,
-        #     check=True,
-        #     capture_output=True,
-        # )
+        print(f'{TYPESHED_REPO_DIR} exists, fetching {TYPESHED_COMMIT}...')
     else:
-        print(f'Cloning typeshed to {TYPESHED_REPO_DIR}...')
-        subprocess.run(
-            ['git', 'clone', '--depth=1', TYPESHED_REPO_URL, str(TYPESHED_REPO_DIR)],
-            check=True,
-            capture_output=True,
-        )
+        print(f'Cloning typeshed (shallow) to {TYPESHED_REPO_DIR}...')
+        run_command('git', 'clone', '--depth=1', TYPESHED_REPO_URL, str(TYPESHED_REPO_DIR))
 
-    result = subprocess.run(
-        ['git', 'rev-parse', 'HEAD'],
-        cwd=TYPESHED_REPO_DIR,
-        check=True,
-        capture_output=True,
-        text=True,
-    )
-    commit = result.stdout.strip()
+    # Fetch the specific commit (needed for shallow clones)
+    run_command('git', 'fetch', '--depth=1', 'origin', TYPESHED_COMMIT, cwd=TYPESHED_REPO_DIR)
 
-    return TYPESHED_REPO_DIR, commit
+    # Checkout the specific commit
+    run_command('git', 'checkout', TYPESHED_COMMIT, cwd=TYPESHED_REPO_DIR)
+
+    return TYPESHED_REPO_DIR, TYPESHED_COMMIT
 
 
 def filter_statements(nodes: list[ast.stmt]) -> list[ast.stmt]:
@@ -260,7 +276,7 @@ def filter_builtins(source: str) -> str:
     tree = ast.parse(source)
     tree.body = filter_statements(tree.body)
     ast.fix_missing_locations(tree)
-    return ast.unparse(tree)
+    return ast.unparse(tree).strip('\n') + '\n'
 
 
 def copy_dependencies(src_stdlib: Path, dest_stdlib: Path) -> None:
