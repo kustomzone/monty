@@ -80,6 +80,8 @@ pub fn monty_to_js<'e>(obj: &MontyObject, env: &'e Env) -> Result<JsMontyObject<
         MontyObject::Bytes(bytes) => create_js_buffer(bytes, env)?,
         MontyObject::List(items) => create_js_array(items, env)?.into_unknown(env)?,
         MontyObject::Tuple(items) => create_js_tuple(items, env)?,
+        // NamedTuple is converted to a tuple (loses named access in JS)
+        MontyObject::NamedTuple { values, .. } => create_js_tuple(values, env)?,
         MontyObject::Dict(pairs) => create_js_map(pairs, env)?,
         MontyObject::Set(items) | MontyObject::FrozenSet(items) => create_js_set(items, env)?,
         MontyObject::Exception { exc_type, arg } => create_js_exception(*exc_type, arg.as_deref(), env)?,
@@ -93,6 +95,7 @@ pub fn monty_to_js<'e>(obj: &MontyObject, env: &'e Env) -> Result<JsMontyObject<
             methods,
             frozen,
         } => create_js_dataclass(name, *type_id, field_names, attrs, methods, *frozen, env)?,
+        MontyObject::Path(p) => env.create_string(p)?.into_unknown(env)?,
         MontyObject::Repr(s) | MontyObject::Cycle(_, s) => env.create_string(s)?.into_unknown(env)?,
     };
     Ok(JsMontyObject(unknown))

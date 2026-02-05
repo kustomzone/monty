@@ -222,6 +222,31 @@ pub enum StaticStrings {
     Monty,
 
     // ==========================
+    // os.stat_result fields
+    #[strum(serialize = "StatResult")]
+    OsStatResult,
+    #[strum(serialize = "st_mode")]
+    StMode,
+    #[strum(serialize = "st_ino")]
+    StIno,
+    #[strum(serialize = "st_dev")]
+    StDev,
+    #[strum(serialize = "st_nlink")]
+    StNlink,
+    #[strum(serialize = "st_uid")]
+    StUid,
+    #[strum(serialize = "st_gid")]
+    StGid,
+    #[strum(serialize = "st_size")]
+    StSize,
+    #[strum(serialize = "st_atime")]
+    StAtime,
+    #[strum(serialize = "st_mtime")]
+    StMtime,
+    #[strum(serialize = "st_ctime")]
+    StCtime,
+
+    // ==========================
     // typing module strings
     #[strum(serialize = "typing")]
     Typing,
@@ -286,8 +311,102 @@ pub enum StaticStrings {
     Gather,
 
     // ==========================
+    // os module strings
+    #[strum(serialize = "os")]
+    Os,
+    #[strum(serialize = "getenv")]
+    Getenv,
+    #[strum(serialize = "environ")]
+    Environ,
+    #[strum(serialize = "default")]
+    Default,
+
+    // ==========================
     // Exception attributes
     Args,
+
+    // ==========================
+    // Type attributes
+    #[strum(serialize = "__name__")]
+    DunderName,
+
+    // ==========================
+    // pathlib module strings
+    #[strum(serialize = "pathlib")]
+    Pathlib,
+    #[strum(serialize = "Path")]
+    PathClass,
+
+    // Path properties (pure - no I/O)
+    #[strum(serialize = "name")]
+    Name,
+    #[strum(serialize = "parent")]
+    Parent,
+    #[strum(serialize = "stem")]
+    Stem,
+    #[strum(serialize = "suffix")]
+    Suffix,
+    #[strum(serialize = "suffixes")]
+    Suffixes,
+    #[strum(serialize = "parts")]
+    Parts,
+
+    // Path pure methods (no I/O)
+    #[strum(serialize = "is_absolute")]
+    IsAbsolute,
+    #[strum(serialize = "joinpath")]
+    Joinpath,
+    #[strum(serialize = "with_name")]
+    WithName,
+    #[strum(serialize = "with_stem")]
+    WithStem,
+    #[strum(serialize = "with_suffix")]
+    WithSuffix,
+    #[strum(serialize = "as_posix")]
+    AsPosix,
+    #[strum(serialize = "__fspath__")]
+    Fspath,
+
+    // Path filesystem methods (require OsAccess - yield external calls)
+    #[strum(serialize = "exists")]
+    Exists,
+    #[strum(serialize = "is_file")]
+    IsFile,
+    #[strum(serialize = "is_dir")]
+    IsDir,
+    #[strum(serialize = "is_symlink")]
+    IsSymlink,
+    #[strum(serialize = "stat")]
+    StatMethod,
+    #[strum(serialize = "read_bytes")]
+    ReadBytes,
+    #[strum(serialize = "read_text")]
+    ReadText,
+    #[strum(serialize = "iterdir")]
+    Iterdir,
+    #[strum(serialize = "resolve")]
+    Resolve,
+    #[strum(serialize = "absolute")]
+    Absolute,
+
+    // Path write methods (require OsAccess - yield external calls)
+    #[strum(serialize = "write_text")]
+    WriteText,
+    #[strum(serialize = "write_bytes")]
+    WriteBytes,
+    #[strum(serialize = "mkdir")]
+    Mkdir,
+    #[strum(serialize = "unlink")]
+    Unlink,
+    #[strum(serialize = "rmdir")]
+    Rmdir,
+    #[strum(serialize = "rename")]
+    Rename,
+
+    // Slice attributes
+    Start,
+    Stop,
+    Step,
 }
 
 impl StaticStrings {

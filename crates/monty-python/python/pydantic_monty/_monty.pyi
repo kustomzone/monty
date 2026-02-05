@@ -4,8 +4,10 @@ from typing import Any, Callable, Literal, final, overload
 from typing_extensions import Self
 
 from . import ExternalResult, ResourceLimits
+from .os_access import OsFunction
 
 __all__ = [
+    '__version__',
     'Monty',
     'MontyComplete',
     'MontySnapshot',
@@ -15,7 +17,6 @@ __all__ = [
     'MontyRuntimeError',
     'MontyTypingError',
     'Frame',
-    '__version__',
 ]
 __version__: str
 
@@ -83,17 +84,22 @@ class Monty:
         limits: ResourceLimits | None = None,
         external_functions: dict[str, Callable[..., Any]] | None = None,
         print_callback: Callable[[Literal['stdout'], str], None] | None = None,
+        os: Callable[[OsFunction, tuple[Any, ...]], Any] | None = None,
     ) -> Any:
         """
         Execute the code and return the result.
 
-        The GIL is released allowing parallel execution if `print_callback` is `None`.
+        The GIL is released allowing parallel execution.
 
         Arguments:
             inputs: Dict of input variable values (must match names from __init__)
             limits: Optional resource limits configuration
             external_functions: Dict of external function callbacks (must match names from __init__)
             print_callback: Optional callback for print output
+            os: Optional callback for OS calls.
+                Called with (function_name, args) where function_name is like 'Path.exists'
+                and args is a tuple of arguments. Must return the appropriate value for the
+                OS function (e.g., bool for exists(), stat_result for stat()).
 
         Returns:
             The result of the last expression in the code
@@ -114,7 +120,7 @@ class Monty:
 
         This allows you to iteratively run code and parse/resume whenever an external function is called.
 
-        The GIL is released allowing parallel execution if `print_callback` is `None`.
+        The GIL is released allowing parallel execution.
 
         Arguments:
             inputs: Dict of input variable values (must match names from __init__)
@@ -196,8 +202,15 @@ class MontySnapshot:
         """The name of the script being executed."""
 
     @property
-    def function_name(self) -> str:
-        """The name of the external function being called."""
+    def is_os_function(self) -> bool:
+        """Whether this snapshot is for an OS function call (e.g., Path.stat)."""
+
+    @property
+    def function_name(self) -> str | OsFunction:
+        """The name of the function being called (external function or OS function like 'Path.stat').
+
+        Will be a `OsFunction` if `is_os_function` is `True`.
+        """
 
     @property
     def args(self) -> tuple[Any, ...]:
@@ -217,7 +230,7 @@ class MontySnapshot:
 
         `resume` may only be called once on each MontySnapshot instance.
 
-        The GIL is released allowing parallel execution if `print_callback` is `None`.
+        The GIL is released allowing parallel execution.
 
         Arguments:
             return_value: The value to return from the external function call.
@@ -325,7 +338,7 @@ class MontyFutureSnapshot:
 
         `resume` may only be called once on each MontyFutureSnapshot instance.
 
-        The GIL is released allowing parallel execution if `print_callback` is `None`.
+        The GIL is released allowing parallel execution.
 
         Arguments:
             results: Dict mapping call_id to result dict. Each result dict must have

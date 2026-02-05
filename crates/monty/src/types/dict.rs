@@ -1,4 +1,8 @@
-use std::fmt::Write;
+use std::{
+    collections::hash_map::DefaultHasher,
+    fmt::Write,
+    hash::{Hash, Hasher},
+};
 
 use ahash::AHashSet;
 use hashbrown::{HashTable, hash_table::Entry};
@@ -11,7 +15,7 @@ use crate::{
     intern::{Interns, StaticStrings},
     resource::ResourceTracker,
     types::Type,
-    value::{Attr, Value},
+    value::{EitherStr, Value},
 };
 
 /// Python dict type preserving insertion order.
@@ -200,11 +204,6 @@ impl Dict {
     /// This is an O(1) lookup that doesn't require mutable heap access.
     /// Only works for string keys - returns None if the key is not found.
     pub fn get_by_str(&self, key_str: &str, heap: &Heap<impl ResourceTracker>, interns: &Interns) -> Option<&Value> {
-        use std::{
-            collections::hash_map::DefaultHasher,
-            hash::{Hash, Hasher},
-        };
-
         // Compute hash for the string key
         let mut hasher = DefaultHasher::new();
         key_str.hash(&mut hasher);
@@ -600,7 +599,7 @@ impl PyTrait for Dict {
     fn py_call_attr(
         &mut self,
         heap: &mut Heap<impl ResourceTracker>,
-        attr: &Attr,
+        attr: &EitherStr,
         args: ArgValues,
         interns: &Interns,
     ) -> RunResult<Value> {

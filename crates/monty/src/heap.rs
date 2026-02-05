@@ -15,13 +15,13 @@ use crate::{
     args::ArgValues,
     asyncio::{Coroutine, GatherFuture, GatherItem},
     exception_private::{ExcType, RunResult, SimpleException},
-    intern::{FunctionId, Interns},
+    intern::{FunctionId, Interns, StringId},
     resource::{ResourceError, ResourceTracker},
     types::{
-        Bytes, Dataclass, Dict, FrozenSet, List, LongInt, Module, MontyIter, NamedTuple, PyTrait, Range, Set, Slice,
-        Str, Tuple, Type,
+        AttrCallResult, Bytes, Dataclass, Dict, FrozenSet, List, LongInt, Module, MontyIter, NamedTuple, Path, PyTrait,
+        Range, Set, Slice, Str, Tuple, Type,
     },
-    value::{Attr, Value},
+    value::{EitherStr, Value},
 };
 
 /// Unique identifier for values stored inside the heap arena.
@@ -120,6 +120,12 @@ pub(crate) enum HeapData {
     ///
     /// Created by asyncio.gather() and spawns tasks when awaited.
     GatherFuture(GatherFuture),
+    /// A filesystem path from `pathlib.Path`.
+    ///
+    /// Stored on the heap to provide Python-compatible path operations.
+    /// Pure methods (name, parent, etc.) are handled directly by the VM.
+    /// I/O methods (exists, read_text, etc.) yield external function calls.
+    Path(Path),
 }
 
 impl HeapData {
@@ -193,9 +199,13 @@ impl HeapData {
                         .any(|r| r.as_ref().is_some_and(|v| matches!(v, Value::Ref(_))))
             }
             // Leaf types cannot have refs
-            Self::Str(_) | Self::Bytes(_) | Self::Range(_) | Self::Slice(_) | Self::Exception(_) | Self::LongInt(_) => {
-                false
-            }
+            Self::Str(_)
+            | Self::Bytes(_)
+            | Self::Range(_)
+            | Self::Slice(_)
+            | Self::Exception(_)
+            | Self::LongInt(_)
+            | Self::Path(_) => false,
         }
     }
 
@@ -276,6 +286,13 @@ impl HeapData {
                 slice.step.hash(&mut hasher);
                 Some(hasher.finish())
             }
+            // Path is immutable and hashable
+            Self::Path(path) => {
+                let mut hasher = DefaultHasher::new();
+                discriminant(self).hash(&mut hasher);
+                path.as_str().hash(&mut hasher);
+                Some(hasher.finish())
+            }
             // Mutable types, exceptions, iterators, modules, and async types cannot be hashed
             // (Cell is handled specially in get_or_compute_hash)
             Self::List(_)
@@ -319,6 +336,7 @@ impl PyTrait for HeapData {
             Self::LongInt(_) => Type::Int,
             Self::Module(_) => Type::Module,
             Self::Coroutine(_) | Self::GatherFuture(_) => Type::Coroutine,
+            Self::Path(p) => p.py_type(heap),
         }
     }
 
@@ -353,6 +371,7 @@ impl PyTrait for HeapData {
                     + gather.results.len() * std::mem::size_of::<Option<Value>>()
                     + gather.pending_calls.len() * std::mem::size_of::<crate::asyncio::CallId>()
             }
+            Self::Path(p) => p.py_estimate_size(),
         }
     }
 
@@ -367,7 +386,7 @@ impl PyTrait for HeapData {
             Self::Set(s) => PyTrait::py_len(s, heap, interns),
             Self::FrozenSet(fs) => PyTrait::py_len(fs, heap, interns),
             Self::Range(r) => Some(r.len()),
-            // Cells, Slices, Exceptions, Dataclasses, Iterators, LongInts, Modules, and async types don't have length
+            // Cells, Slices, Exceptions, Dataclasses, Iterators, LongInts, Modules, Paths, and async types don't have length
             Self::Cell(_)
             | Self::Closure(_, _, _)
             | Self::FunctionDefaults(_, _)
@@ -378,7 +397,8 @@ impl PyTrait for HeapData {
             | Self::LongInt(_)
             | Self::Module(_)
             | Self::Coroutine(_)
-            | Self::GatherFuture(_) => None,
+            | Self::GatherFuture(_)
+            | Self::Path(_) => None,
         }
     }
 
@@ -412,6 +432,8 @@ impl PyTrait for HeapData {
             (Self::LongInt(a), Self::LongInt(b)) => a == b,
             // Slice equality
             (Self::Slice(a), Self::Slice(b)) => a.py_eq(b, heap, interns),
+            // Path equality
+            (Self::Path(a), Self::Path(b)) => a.py_eq(b, heap, interns),
             // Cells, Exceptions, Iterators, Modules, and async types compare by identity only (handled at Value level via HeapId comparison)
             (Self::Cell(_), Self::Cell(_))
             | (Self::Exception(_), Self::Exception(_))
@@ -471,8 +493,8 @@ impl PyTrait for HeapData {
                     result.py_dec_ref_ids(stack);
                 }
             }
-            // Range, Slice, Exception, and LongInt have no nested heap references
-            Self::Range(_) | Self::Slice(_) | Self::Exception(_) | Self::LongInt(_) => {}
+            // Range, Slice, Exception, LongInt, and Path have no nested heap references
+            Self::Range(_) | Self::Slice(_) | Self::Exception(_) | Self::LongInt(_) | Self::Path(_) => {}
         }
     }
 
@@ -497,6 +519,7 @@ impl PyTrait for HeapData {
             Self::Module(_) => true,       // Modules are always truthy
             Self::Coroutine(_) => true,    // Coroutines are always truthy
             Self::GatherFuture(_) => true, // GatherFutures are always truthy
+            Self::Path(p) => p.py_bool(heap, interns),
         }
     }
 
@@ -534,6 +557,7 @@ impl PyTrait for HeapData {
                 write!(f, "<coroutine object {name}>")
             }
             Self::GatherFuture(gather) => write!(f, "<gather({})>", gather.item_count()),
+            Self::Path(p) => p.py_repr_fmt(f, heap, heap_ids, interns),
         }
     }
 
@@ -544,7 +568,9 @@ impl PyTrait for HeapData {
             // LongInt returns its string representation
             Self::LongInt(li) => Cow::Owned(li.to_string()),
             // Exceptions return just the message (or empty string if no message)
-            Self::Exception(e) => Cow::Owned(e.arg().cloned().unwrap_or_default()),
+            Self::Exception(e) => Cow::Owned(e.py_str()),
+            // Paths return the path string without the PosixPath() wrapper
+            Self::Path(p) => Cow::Owned(p.as_str().to_owned()),
             // All other types use repr
             _ => self.py_repr(heap, interns),
         }
@@ -645,7 +671,7 @@ impl PyTrait for HeapData {
     fn py_call_attr(
         &mut self,
         heap: &mut Heap<impl ResourceTracker>,
-        attr: &Attr,
+        attr: &EitherStr,
         args: ArgValues,
         interns: &Interns,
     ) -> RunResult<Value> {
@@ -658,8 +684,27 @@ impl PyTrait for HeapData {
             Self::Set(s) => s.py_call_attr(heap, attr, args, interns),
             Self::FrozenSet(fs) => fs.py_call_attr(heap, attr, args, interns),
             Self::Dataclass(dc) => dc.py_call_attr(heap, attr, args, interns),
-            Self::Module(m) => m.py_call_attr(heap, attr, args, interns),
+            Self::Path(p) => p.py_call_attr(heap, attr, args, interns),
             _ => Err(ExcType::attribute_error(self.py_type(heap), attr.as_str(interns))),
+        }
+    }
+
+    fn py_call_attr_raw(
+        &mut self,
+        heap: &mut Heap<impl ResourceTracker>,
+        attr: &EitherStr,
+        args: ArgValues,
+        interns: &Interns,
+    ) -> RunResult<AttrCallResult> {
+        match self {
+            // Path has special handling for OS calls (exists, read_text, etc.)
+            Self::Path(p) => p.py_call_attr_raw(heap, attr, args, interns),
+            // Dataclass has special handling for external method calls
+            Self::Dataclass(dc) => dc.py_call_attr_raw(heap, attr, args, interns),
+            // Module has special handling for OS calls (os.getenv, etc.)
+            Self::Module(m) => m.py_call_attr_raw(heap, attr, args, interns),
+            // All other types use the default implementation (wrap py_call_attr)
+            _ => self.py_call_attr(heap, attr, args, interns).map(AttrCallResult::Value),
         }
     }
 
@@ -690,6 +735,24 @@ impl PyTrait for HeapData {
             Self::Tuple(t) => t.py_setitem(key, value, heap, interns),
             Self::Dict(d) => d.py_setitem(key, value, heap, interns),
             _ => Err(ExcType::type_error_not_sub_assignment(self.py_type(heap))),
+        }
+    }
+
+    fn py_getattr(
+        &self,
+        attr_id: StringId,
+        heap: &mut Heap<impl ResourceTracker>,
+        interns: &Interns,
+    ) -> RunResult<Option<AttrCallResult>> {
+        match self {
+            Self::Dataclass(dc) => dc.py_getattr(attr_id, heap, interns),
+            Self::Module(m) => Ok(m.py_getattr(attr_id, heap, interns)),
+            Self::NamedTuple(nt) => nt.py_getattr(attr_id, heap, interns),
+            Self::Slice(s) => s.py_getattr(attr_id, heap, interns),
+            Self::Exception(exc) => exc.py_getattr(attr_id, heap, interns),
+            Self::Path(p) => p.py_getattr(attr_id, heap, interns),
+            // All other types don't support attribute access via py_getattr
+            _ => Ok(None),
         }
     }
 }
@@ -733,6 +796,8 @@ impl HashState {
                     Self::Unhashable
                 }
             }
+            // Path is immutable and hashable
+            HeapData::Path(_) => Self::Unknown,
             // Mutable containers, exceptions, iterators, modules, and async types are unhashable
             HeapData::List(_)
             | HeapData::Dict(_)
@@ -1081,24 +1146,30 @@ impl<T: ResourceTracker> Heap<T> {
         hash
     }
 
-    /// Calls an attribute on the heap entry at `id` while temporarily taking ownership
-    /// of its payload so we can borrow the heap again inside the call. This avoids the
-    /// borrow checker conflict that arises when attribute implementations also need
-    /// mutable access to the heap (e.g. for refcounting).
-    pub fn call_attr(&mut self, id: HeapId, attr: &Attr, args: ArgValues, interns: &Interns) -> RunResult<Value> {
-        // Take data out in a block so the borrow of self.entries ends
+    /// Calls an attribute on the heap entry, returning an `AttrCallResult` that may signal
+    /// OS or external calls.
+    ///
+    /// Temporarily takes ownership of the payload to avoid borrow conflicts when attribute
+    /// implementations also need mutable heap access (e.g. for refcounting).
+    ///
+    /// Returns `AttrCallResult` which may be:
+    /// - `Value(v)` - Method completed synchronously with value `v`
+    /// - `OsCall(func, args)` - Method needs OS operation; VM should yield to host
+    /// - `ExternalCall(id, args)` - Method needs external function call
+    pub fn call_attr_raw(
+        &mut self,
+        id: HeapId,
+        attr: &EitherStr,
+        args: ArgValues,
+        interns: &Interns,
+    ) -> RunResult<AttrCallResult> {
+        // Take data out so the borrow of self.entries ends
         let mut data = take_data!(self, id, "call_attr");
 
-        let result = data.py_call_attr(self, attr, args, interns);
+        let result = data.py_call_attr_raw(self, attr, args, interns);
 
         // Restore data
-        let entry = self
-            .entries
-            .get_mut(id.index())
-            .expect("Heap::call_attr: slot missing")
-            .as_mut()
-            .expect("Heap::call_attr: object already freed");
-        entry.data = Some(data);
+        restore_data!(self, id, data, "call_attr_raw");
         result
     }
 
@@ -1456,7 +1527,8 @@ fn collect_child_ids(data: &HeapData, work_list: &mut Vec<HeapId>) {
         | HeapData::Range(_)
         | HeapData::Exception(_)
         | HeapData::LongInt(_)
-        | HeapData::Slice(_) => {}
+        | HeapData::Slice(_)
+        | HeapData::Path(_) => {}
         HeapData::List(list) => {
             // Skip iteration if no refs - major GC optimization for lists of primitives
             if !list.contains_refs() {

@@ -13,10 +13,12 @@ use crate::{
     heap::{Heap, HeapId},
     intern::{Interns, StaticStrings, StringId},
     resource::{ResourceError, ResourceTracker},
-    value::Value,
+    types::AttrCallResult,
 };
 
 pub(crate) mod asyncio;
+pub(crate) mod os;
+pub(crate) mod pathlib;
 pub(crate) mod sys;
 pub(crate) mod typing;
 
@@ -30,6 +32,10 @@ pub(crate) enum BuiltinModule {
     Typing,
     /// The `asyncio` module providing async/await support (only `gather()` implemented).
     Asyncio,
+    /// The `pathlib` module providing object-oriented filesystem paths.
+    Pathlib,
+    /// The `os` module providing operating system interface (only `getenv()` implemented).
+    Os,
 }
 
 impl BuiltinModule {
@@ -39,6 +45,8 @@ impl BuiltinModule {
             StaticStrings::Sys => Some(Self::Sys),
             StaticStrings::Typing => Some(Self::Typing),
             StaticStrings::Asyncio => Some(Self::Asyncio),
+            StaticStrings::Pathlib => Some(Self::Pathlib),
+            StaticStrings::Os => Some(Self::Os),
             _ => None,
         }
     }
@@ -55,6 +63,8 @@ impl BuiltinModule {
             Self::Sys => sys::create_module(heap, interns),
             Self::Typing => typing::create_module(heap, interns),
             Self::Asyncio => asyncio::create_module(heap, interns),
+            Self::Pathlib => pathlib::create_module(heap, interns),
+            Self::Os => os::create_module(heap, interns),
         }
     }
 }
@@ -63,21 +73,27 @@ impl BuiltinModule {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, serde::Serialize, serde::Deserialize)]
 pub(crate) enum ModuleFunctions {
     Asyncio(asyncio::AsyncioFunctions),
+    Os(os::OsFunctions),
 }
 
 impl fmt::Display for ModuleFunctions {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
             Self::Asyncio(func) => write!(f, "{func}"),
+            Self::Os(func) => write!(f, "{func}"),
         }
     }
 }
 
 impl ModuleFunctions {
     /// Calls the module function with the given arguments.
-    pub fn call(self, heap: &mut Heap<impl ResourceTracker>, args: ArgValues) -> RunResult<Value> {
+    ///
+    /// Returns `AttrCallResult` to support both immediate values and OS calls that
+    /// require host involvement (e.g., `os.getenv()` needs the host to provide environment variables).
+    pub fn call(self, heap: &mut Heap<impl ResourceTracker>, args: ArgValues) -> RunResult<AttrCallResult> {
         match self {
             Self::Asyncio(functions) => asyncio::call(heap, functions, args),
+            Self::Os(functions) => os::call(heap, functions, args),
         }
     }
 

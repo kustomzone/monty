@@ -11,7 +11,7 @@ use crate::{
     intern::Interns,
     resource::ResourceTracker,
     types::{
-        Bytes, Dict, FrozenSet, List, LongInt, MontyIter, PyTrait, Range, Set, Slice, Str, Tuple, str::StringRepr,
+        Bytes, Dict, FrozenSet, List, LongInt, MontyIter, Path, PyTrait, Range, Set, Slice, Str, Tuple, str::StringRepr,
     },
     value::Value,
 };
@@ -60,6 +60,12 @@ pub enum Type {
     /// typing module special forms (Any, Optional, Union, etc.) - displays as "typing._SpecialForm"
     #[strum(serialize = "typing._SpecialForm")]
     SpecialForm,
+    /// A filesystem path from `pathlib.Path` - displays as "PosixPath"
+    #[strum(serialize = "PosixPath")]
+    Path,
+    /// A property descriptor - displays as "property"
+    #[strum(serialize = "property")]
+    Property,
 }
 
 impl fmt::Display for Type {
@@ -91,6 +97,8 @@ impl fmt::Display for Type {
             Self::Module => f.write_str("module"),
             Self::TextIOWrapper => f.write_str("_io.TextIOWrapper"),
             Self::SpecialForm => f.write_str("typing._SpecialForm"),
+            Self::Path => f.write_str("PosixPath"),
+            Self::Property => f.write_str("property"),
         }
     }
 }
@@ -132,6 +140,7 @@ impl Type {
             Self::Range => Some(10),
             Self::Slice => Some(11),
             Self::Iterator => Some(12),
+            Self::Path => Some(13),
             _ => None,
         }
     }
@@ -155,6 +164,7 @@ impl Type {
             10 => Some(Self::Range),
             11 => Some(Self::Slice),
             12 => Some(Self::Iterator),
+            13 => Some(Self::Path),
             _ => None,
         }
     }
@@ -181,6 +191,7 @@ impl Type {
             Self::Range => Range::init(heap, args),
             Self::Slice => Slice::init(heap, args),
             Self::Iterator => MontyIter::init(heap, args, interns),
+            Self::Path => Path::init(heap, args, interns),
 
             // Primitive types - inline implementation
             Self::Int => {

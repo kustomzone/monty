@@ -1,6 +1,6 @@
 use std::{
     borrow::Cow,
-    fmt::{self, Write},
+    fmt::{self, Display, Write},
 };
 
 use serde::{Deserialize, Serialize};
@@ -11,10 +11,13 @@ use crate::{
     exception_public::{MontyException, StackFrame},
     fstring::FormatError,
     heap::{Heap, HeapData},
-    intern::{Interns, StringId},
+    intern::{Interns, StaticStrings, StringId},
     parse::CodeRange,
     resource::ResourceTracker,
-    types::{PyTrait, Type, str::string_repr_fmt},
+    types::{
+        AttrCallResult, PyTrait, Str, Tuple, Type,
+        str::{StringRepr, string_repr_fmt},
+    },
     value::Value,
 };
 
@@ -80,6 +83,18 @@ pub enum ExcType {
     /// Subclass of ImportError - for when a module cannot be found.
     ModuleNotFoundError,
 
+    // --- OSError hierarchy ---
+    /// OS-related errors (file not found, permission denied, etc.)
+    OSError,
+    /// Subclass of OSError - for when a file or directory cannot be found.
+    FileNotFoundError,
+    /// Subclass of OSError - for when a file already exists.
+    FileExistsError,
+    /// Subclass of OSError - for when a path is a directory but a file was expected.
+    IsADirectoryError,
+    /// Subclass of OSError - for when a path is not a directory but one was expected.
+    NotADirectoryError,
+
     // --- Standalone exception types ---
     AssertionError,
     MemoryError,
@@ -123,6 +138,11 @@ impl ExcType {
             Self::ValueError => matches!(self, Self::UnicodeDecodeError),
             // ImportError catches ModuleNotFoundError
             Self::ImportError => matches!(self, Self::ModuleNotFoundError),
+            // OSError catches FileNotFoundError, FileExistsError, IsADirectoryError, NotADirectoryError
+            Self::OSError => matches!(
+                self,
+                Self::FileNotFoundError | Self::FileExistsError | Self::IsADirectoryError | Self::NotADirectoryError
+            ),
             // All other types only match exactly (handled by self == handler_type above)
             _ => false,
         }
@@ -182,10 +202,10 @@ impl ExcType {
     ///
     /// Sets `hide_caret: true` because CPython doesn't show carets for attribute GET errors.
     #[must_use]
-    pub(crate) fn attribute_error(type_: Type, attr: &str) -> RunError {
+    pub(crate) fn attribute_error(type_name: impl Display, attr: &str) -> RunError {
         let exc = SimpleException::new_msg(
             Self::AttributeError,
-            format!("'{type_}' object has no attribute '{attr}'"),
+            format!("'{type_name}' object has no attribute '{attr}'"),
         );
         RunError::Exc(ExceptionRaise {
             exc,
@@ -205,23 +225,6 @@ impl ExcType {
             format!("'{class_name}' object method '{method_name}' requires external call (not yet implemented)"),
         )
         .into()
-    }
-
-    /// Creates an AttributeError for when a specific attribute is not found (GET operation).
-    ///
-    /// Matches CPython's format: `AttributeError: 'ClassName' object has no attribute 'attr_name'`
-    /// Sets `hide_caret: true` because CPython doesn't show carets for attribute GET errors.
-    #[must_use]
-    pub(crate) fn attribute_error_not_found(class_name: &str, attr_name: &str) -> RunError {
-        let exc = SimpleException::new_msg(
-            Self::AttributeError,
-            format!("'{class_name}' object has no attribute '{attr_name}'"),
-        );
-        RunError::Exc(ExceptionRaise {
-            exc,
-            frame: None,
-            hide_caret: true, // CPython doesn't show carets for attribute GET errors
-        })
     }
 
     /// Creates an AttributeError for attribute assignment on types that don't support it.
@@ -328,20 +331,9 @@ impl ExcType {
     /// Creates a KeyError for a missing dict key.
     ///
     /// For string keys, uses the raw string value without extra quoting.
-    /// For other types, uses repr.
     #[must_use]
     pub(crate) fn key_error(key: &Value, heap: &Heap<impl ResourceTracker>, interns: &Interns) -> RunError {
-        let key_str = match key {
-            Value::InternString(string_id) => interns.get_str(*string_id).to_owned(),
-            Value::Ref(id) => {
-                if let HeapData::Str(s) = heap.get(*id) {
-                    s.as_str().to_owned()
-                } else {
-                    key.py_repr(heap, interns).into_owned()
-                }
-            }
-            _ => key.py_repr(heap, interns).into_owned(),
-        };
+        let key_str = key.py_str(heap, interns).into_owned();
         SimpleException::new_msg(Self::KeyError, key_str).into()
     }
 
@@ -585,7 +577,7 @@ impl ExcType {
 
     /// Creates a simple TypeError with a custom message.
     #[must_use]
-    pub(crate) fn type_error(msg: impl Into<String>) -> RunError {
+    pub(crate) fn type_error(msg: impl fmt::Display) -> RunError {
         SimpleException::new_msg(Self::TypeError, msg).into()
     }
 
@@ -834,11 +826,8 @@ impl ExcType {
     /// Used during parsing when encountering Python syntax that Monty doesn't yet support.
     /// The message format is: "The monty syntax parser does not yet support {feature}"
     #[must_use]
-    pub(crate) fn not_implemented(feature: &str) -> SimpleException {
-        SimpleException::new_msg(
-            Self::NotImplementedError,
-            format!("The monty syntax parser does not yet support {feature}"),
-        )
+    pub(crate) fn not_implemented(msg: impl fmt::Display) -> SimpleException {
+        SimpleException::new_msg(Self::NotImplementedError, msg)
     }
 
     /// Creates a ZeroDivisionError for division by zero.
@@ -1130,10 +1119,10 @@ impl SimpleException {
 
     /// Creates a new exception with the given type and argument message.
     #[must_use]
-    pub fn new_msg(exc_type: ExcType, arg: impl Into<String>) -> Self {
+    pub fn new_msg(exc_type: ExcType, arg: impl fmt::Display) -> Self {
         Self {
             exc_type,
-            arg: Some(arg.into()),
+            arg: Some(arg.to_string()),
         }
     }
 
@@ -1151,6 +1140,17 @@ impl SimpleException {
     #[must_use]
     pub fn arg(&self) -> Option<&String> {
         self.arg.as_ref()
+    }
+
+    /// str() for an exception
+    #[must_use]
+    pub fn py_str(&self) -> String {
+        match (self.exc_type, &self.arg) {
+            // KeyError expecificaly uses repr of the key for str(exc)
+            (ExcType::KeyError, Some(exc)) => StringRepr(exc).to_string(),
+            (_, Some(arg)) => arg.to_owned(),
+            (_, None) => String::new(),
+        }
     }
 
     pub(crate) fn py_type(&self) -> Type {
@@ -1182,6 +1182,31 @@ impl SimpleException {
             exc: self,
             frame: Some(RawStackFrame::from_position(position)),
             hide_caret: false,
+        }
+    }
+
+    /// Gets an attribute from this exception.
+    ///
+    /// Handles the `.args` attribute by allocating a tuple containing the message.
+    /// Returns `Err(AttributeError)` for all other attributes.
+    pub fn py_getattr(
+        &self,
+        attr_id: StringId,
+        heap: &mut Heap<impl ResourceTracker>,
+        _interns: &Interns,
+    ) -> RunResult<Option<AttrCallResult>> {
+        if attr_id == StaticStrings::Args {
+            // Construct tuple with 0 or 1 elements based on whether arg exists
+            let elements = if let Some(arg_str) = &self.arg {
+                let str_id = heap.allocate(HeapData::Str(Str::from(arg_str.clone())))?;
+                vec![Value::Ref(str_id)]
+            } else {
+                vec![]
+            };
+            let tuple_id = heap.allocate(HeapData::Tuple(Tuple::new(elements)))?;
+            Ok(Some(AttrCallResult::Value(Value::Ref(tuple_id))))
+        } else {
+            Ok(None)
         }
     }
 }
@@ -1378,7 +1403,7 @@ impl From<FormatError> for RunError {
             FormatError::Overflow(_) => ExcType::OverflowError,
             FormatError::InvalidAlignment(_) | FormatError::ValueError(_) => ExcType::ValueError,
         };
-        Self::Exc(SimpleException::new_msg(exc_type, err.to_string()).into())
+        Self::Exc(SimpleException::new_msg(exc_type, err).into())
     }
 }
 

@@ -5,6 +5,7 @@ use std::{
     fmt::{self, Write},
     hash::{Hash, Hasher},
     mem::discriminant,
+    str::FromStr,
 };
 
 use ahash::AHashSet;
@@ -21,9 +22,9 @@ use crate::{
     modules::ModuleFunctions,
     resource::{LARGE_RESULT_THRESHOLD, ResourceTracker},
     types::{
-        LongInt, PyTrait, Str, Tuple, Type,
+        AttrCallResult, LongInt, Property, PyTrait, Str, Type,
         bytes::{bytes_repr_fmt, get_byte_at_index, get_bytes_slice},
-        slice,
+        path,
         str::{allocate_char, get_char_at_index, get_str_slice, string_repr_fmt},
     },
 };
@@ -69,6 +70,9 @@ pub(crate) enum Value {
     /// A marker value representing special objects like sys.stdout/stderr.
     /// These exist but have minimal functionality in the sandboxed environment.
     Marker(Marker),
+    /// A property descriptor that computes its value when accessed.
+    /// When retrieved via `py_getattr`, the property's getter is invoked.
+    Property(Property),
     /// A pending external function call result.
     ///
     /// Created when the host calls `run_pending()` instead of `run(result)` for an
@@ -123,6 +127,7 @@ impl PyTrait for Value {
             Self::ModuleFunction(_) => Type::BuiltinFunction,
             Self::DefFunction(_) | Self::ExtFunction(_) => Type::Function,
             Self::Marker(m) => m.py_type(),
+            Self::Property(_) => Type::Property,
             Self::ExternalFuture(_) => Type::Coroutine,
             Self::Ref(id) => heap.get(*id).py_type(heap),
             #[cfg(feature = "ref-count-panic")]
@@ -235,6 +240,8 @@ impl PyTrait for Value {
             (Self::DefFunction(f1), Self::DefFunction(f2)) => f1 == f2,
             // Markers compare equal if they're the same variant
             (Self::Marker(m1), Self::Marker(m2)) => m1 == m2,
+            // Properties compare equal if they're the same variant
+            (Self::Property(p1), Self::Property(p2)) => p1 == p2,
 
             _ => false,
         }
@@ -310,6 +317,7 @@ impl PyTrait for Value {
             Self::Builtin(_) | Self::ModuleFunction(_) => true, // Builtins are always truthy
             Self::DefFunction(_) | Self::ExtFunction(_) => true, // Functions are always truthy
             Self::Marker(_) => true,                            // Markers are always truthy
+            Self::Property(_) => true,                          // Properties are always truthy
             Self::ExternalFuture(_) => true,                    // ExternalFutures are always truthy
             Self::InternString(string_id) => !interns.get_str(*string_id).is_empty(),
             Self::InternBytes(bytes_id) => !interns.get_bytes(*bytes_id).is_empty(),
@@ -351,6 +359,7 @@ impl PyTrait for Value {
             Self::InternString(string_id) => string_repr_fmt(interns.get_str(*string_id), f),
             Self::InternBytes(bytes_id) => bytes_repr_fmt(interns.get_bytes(*bytes_id), f),
             Self::Marker(m) => m.py_repr_fmt(f),
+            Self::Property(p) => write!(f, "<property {p:?}>"),
             Self::ExternalFuture(call_id) => write!(f, "<coroutine external_future({})>", call_id.raw()),
             Self::Ref(id) => {
                 if heap_ids.contains(id) {
@@ -897,7 +906,12 @@ impl PyTrait for Value {
         }
     }
 
-    fn py_div(&self, other: &Self, heap: &mut Heap<impl ResourceTracker>) -> RunResult<Option<Value>> {
+    fn py_div(
+        &self,
+        other: &Self,
+        heap: &mut Heap<impl ResourceTracker>,
+        interns: &Interns,
+    ) -> RunResult<Option<Value>> {
         match (self, other) {
             // True division always returns float
             (Self::Int(a), Self::Int(b)) => {
@@ -1044,7 +1058,15 @@ impl PyTrait for Value {
                     Err(ExcType::zero_division().into())
                 }
             }
-            _ => Ok(None),
+            _ => {
+                // Check for Path / (str or Path) - path concatenation
+                if let Self::Ref(id) = self
+                    && matches!(heap.get(*id), HeapData::Path(_))
+                {
+                    return path::path_div(*id, other, heap, interns);
+                }
+                Ok(None)
+            }
         }
     }
 
@@ -1510,6 +1532,8 @@ impl Value {
             Self::ExtFunction(f_id) => ext_function_value_id(*f_id),
             // Markers get deterministic IDs based on discriminant
             Self::Marker(m) => marker_value_id(*m),
+            // Properties get deterministic IDs based on discriminant
+            Self::Property(p) => property_value_id(*p),
             // ExternalFutures get IDs based on their call_id
             Self::ExternalFuture(call_id) => external_future_value_id(*call_id),
             #[cfg(feature = "ref-count-panic")]
@@ -1517,6 +1541,7 @@ impl Value {
         }
     }
 
+    /// Returns the Ref ID if this value is a reference, otherwise returns None.
     pub fn ref_id(&self) -> Option<HeapId> {
         match self {
             Self::Ref(id) => Some(*id),
@@ -1600,6 +1625,8 @@ impl Value {
             Self::ExtFunction(f_id) => f_id.hash(&mut hasher),
             // Markers are hashable based on their discriminant (already included above)
             Self::Marker(m) => m.hash(&mut hasher),
+            // Properties are hashable based on their OS function discriminant
+            Self::Property(p) => p.hash(&mut hasher),
             // ExternalFutures are hashable based on their call ID
             Self::ExternalFuture(call_id) => call_id.raw().hash(&mut hasher),
             Self::InternString(_) | Self::InternBytes(_) | Self::InternLongInt(_) | Self::Ref(_) => {
@@ -1686,118 +1713,36 @@ impl Value {
 
     /// Gets an attribute from this value.
     ///
-    /// Supports attribute access for:
-    /// - Dataclass objects: returns field values
-    /// - Module objects: returns module attributes
-    /// - Exception objects: `.args` returns a tuple of exception arguments
+    /// Dispatches to `py_getattr` on the underlying types where appropriate.
     ///
-    /// Returns AttributeError for other types.
-    pub fn py_get_attr(
+    /// Returns `AttributeError` for other types or unknown attributes.
+    pub fn py_getattr(
         &self,
         name_id: StringId,
         heap: &mut Heap<impl ResourceTracker>,
         interns: &Interns,
-    ) -> RunResult<Self> {
-        let attr_name = interns.get_str(name_id);
-
-        if let Self::Ref(heap_id) = self {
-            let heap_id = *heap_id;
-            let heap_data = heap.get(heap_id);
-
-            match heap_data {
-                HeapData::Dataclass(_) => {
-                    let name_value = Self::InternString(name_id);
-                    heap.with_entry_mut(heap_id, |heap, data| {
-                        if let HeapData::Dataclass(dc) = data {
-                            match dc.get_attr(&name_value, heap, interns) {
-                                Ok(Some(value)) => Ok(value.clone_with_heap(heap)),
-                                Ok(None) => {
-                                    // Use the dataclass's actual name for the error message
-                                    Err(ExcType::attribute_error_not_found(dc.name(), attr_name))
-                                }
-                                Err(e) => Err(e),
-                            }
-                        } else {
-                            unreachable!("type changed during borrow")
-                        }
-                    })
-                }
-                HeapData::Module(_) => {
-                    // Look up attribute in module's attrs dict
-                    let name_value = Self::InternString(name_id);
-                    heap.with_entry_mut(heap_id, |heap, data| {
-                        if let HeapData::Module(module) = data {
-                            if let Some(value) = module.get_attr(&name_value, heap, interns) {
-                                // Increment refcount for Ref values
-                                if let Self::Ref(ref_id) = &value {
-                                    heap.inc_ref(*ref_id);
-                                }
-                                Ok(value)
-                            } else {
-                                let module_name = interns.get_str(module.name());
-                                Err(ExcType::attribute_error_module(module_name, attr_name))
-                            }
-                        } else {
-                            unreachable!("type changed during borrow")
-                        }
-                    })
-                }
-                HeapData::NamedTuple(nt) => {
-                    // Look up attribute by field name
-                    // Copy the value (and type_name for error) without incrementing refcount while we hold the borrow
-                    if let Some(value) = nt.get_by_name(name_id) {
-                        let copied = value.copy_for_extend();
-                        // Increment refcount for heap refs
-                        if let Self::Ref(ref_id) = &copied {
-                            heap.inc_ref(*ref_id);
-                        }
-                        Ok(copied)
-                    } else {
-                        Err(ExcType::attribute_error_not_found(
-                            interns.get_str(nt.type_name()),
-                            attr_name,
-                        ))
-                    }
-                }
-                HeapData::Exception(exc) => {
-                    if name_id == StaticStrings::Args {
-                        // Clone the arg to avoid borrow conflict when allocating
-                        let arg_clone = exc.arg().cloned();
-                        // Construct tuple with 0 or 1 elements based on whether arg exists
-                        let elements = if let Some(arg_str) = arg_clone {
-                            let str_id = heap.allocate(HeapData::Str(Str::from(arg_str)))?;
-                            vec![Self::Ref(str_id)]
-                        } else {
-                            vec![]
-                        };
-                        let tuple_id = heap.allocate(HeapData::Tuple(Tuple::new(elements)))?;
-                        Ok(Self::Ref(tuple_id))
-                    } else {
-                        let exc_type = exc.py_type();
-                        Err(ExcType::attribute_error(exc_type, attr_name))
-                    }
-                }
-                HeapData::Slice(slice) => {
-                    // Handle slice attributes: start, stop, step
-                    match attr_name {
-                        "start" => Ok(slice::option_i64_to_value(slice.start)),
-                        "stop" => Ok(slice::option_i64_to_value(slice.stop)),
-                        "step" => Ok(slice::option_i64_to_value(slice.step)),
-                        _ => Err(ExcType::attribute_error(Type::Slice, attr_name)),
-                    }
-                }
-                _ => {
-                    let type_name = heap_data.py_type(heap);
-                    Err(ExcType::attribute_error(type_name, attr_name))
+    ) -> RunResult<AttrCallResult> {
+        match self {
+            Self::Ref(heap_id) => {
+                // Use with_entry_mut to get access to both data and heap without borrow conflicts.
+                // This allows py_getattr to allocate (for computed attributes) while we hold the data.
+                let opt_result = heap.with_entry_mut(*heap_id, |heap, data| data.py_getattr(name_id, heap, interns))?;
+                if let Some(call_result) = opt_result {
+                    return Ok(call_result);
                 }
             }
-        } else if let Self::Marker(marker) = self {
-            // Markers don't support attribute access - report the marker's actual type
-            Err(ExcType::attribute_error(marker.py_type(), attr_name))
-        } else {
-            let type_name = self.py_type(heap);
-            Err(ExcType::attribute_error(type_name, attr_name))
+            Self::Builtin(Builtins::Type(t)) => {
+                // Handle type object attributes like __name__
+                if name_id == StaticStrings::DunderName {
+                    let name_str = t.to_string();
+                    let str_id = heap.allocate(HeapData::Str(Str::from(name_str)))?;
+                    return Ok(AttrCallResult::Value(Self::Ref(str_id)));
+                }
+            }
+            _ => {}
         }
+        let type_name = self.py_type(heap);
+        Err(ExcType::attribute_error(type_name, interns.get_str(name_id)))
     }
 
     /// Sets an attribute on this value.
@@ -2034,6 +1979,7 @@ impl Value {
             Self::InternBytes(b) => Self::InternBytes(*b),
             Self::InternLongInt(bi) => Self::InternLongInt(*bi),
             Self::Marker(m) => Self::Marker(*m),
+            Self::Property(p) => Self::Property(*p),
             Self::ExternalFuture(call_id) => Self::ExternalFuture(*call_id),
             Self::Ref(id) => Self::Ref(*id), // Caller must increment refcount!
             #[cfg(feature = "ref-count-panic")]
@@ -2054,7 +2000,7 @@ impl Value {
     ///
     /// Returns `Some(KeywordStr)` for `InternString` values or heap `str`
     /// objects, otherwise returns `None`.
-    pub fn as_either_str<T: ResourceTracker>(&self, heap: &mut Heap<T>) -> Option<EitherStr> {
+    pub fn as_either_str(&self, heap: &Heap<impl ResourceTracker>) -> Option<EitherStr> {
         match self {
             Self::InternString(id) => Some(EitherStr::Interned(*id)),
             Self::Ref(heap_id) => match heap.get(*heap_id) {
@@ -2064,15 +2010,50 @@ impl Value {
             _ => None,
         }
     }
+
+    /// check if the value is a string.
+    pub fn is_str(&self, heap: &Heap<impl ResourceTracker>) -> bool {
+        match self {
+            Self::InternString(_) => true,
+            Self::Ref(heap_id) => matches!(heap.get(*heap_id), HeapData::Str(_)),
+            _ => false,
+        }
+    }
 }
 
 /// Interned or heap-owned string identifier.
-#[derive(Debug, Clone)]
-pub enum EitherStr {
+///
+/// Used when a string value can come from either the intern table (for known
+/// static strings and keywords) or from a heap-allocated Python string object.
+#[derive(Debug, Clone, Eq, PartialEq, Hash, serde::Serialize, serde::Deserialize)]
+pub(crate) enum EitherStr {
     /// Interned string identifier (cheap comparisons and no allocation).
     Interned(StringId),
     /// Heap-owned string extracted from a `str` object.
     Heap(String),
+}
+
+impl From<StringId> for EitherStr {
+    fn from(id: StringId) -> Self {
+        Self::Interned(id)
+    }
+}
+
+impl From<StaticStrings> for EitherStr {
+    fn from(s: StaticStrings) -> Self {
+        Self::Interned(s.into())
+    }
+}
+
+/// Convert String to EitherStr: use Interned for known static strings,
+/// otherwise use Heap for user-defined field names.
+impl From<String> for EitherStr {
+    fn from(s: String) -> Self {
+        match StaticStrings::from_str(&s) {
+            Ok(s) => s.into(),
+            Err(_) => Self::Heap(s),
+        }
+    }
 }
 
 impl EitherStr {
@@ -2091,41 +2072,13 @@ impl EitherStr {
             Self::Heap(s) => s == interns.get_str(target),
         }
     }
-}
-
-/// Attribute names for accessing fields and methods on objects.
-///
-/// Uses `StringId` for interned attribute names (parsed at compile time) and
-/// `Other(String)` for runtime-constructed names (e.g., from `getattr()`).
-///
-/// Known method names (append, get, keys, etc.) are pre-interned with stable
-/// `StringId` values - see `intern.rs` for the `ATTR_*` constants.
-#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
-pub(crate) enum Attr {
-    /// Interned attribute name (compile-time constant or parsed identifier).
-    ///
-    /// Compare against `ATTR_*` constants from `intern.rs` for known methods.
-    Interned(StringId),
-
-    /// Runtime-constructed attribute name (rare, e.g., from `getattr()`).
-    Other(String),
-}
-
-impl Attr {
-    /// Returns the attribute name as a string reference.
-    pub fn as_str<'a>(&'a self, interns: &'a Interns) -> &'a str {
-        match self {
-            Self::Interned(id) => interns.get_str(*id),
-            Self::Other(name) => name,
-        }
-    }
 
     /// Returns the `StringId` if this is an interned attribute.
     #[inline]
     pub fn string_id(&self) -> Option<StringId> {
         match self {
             Self::Interned(id) => Some(*id),
-            Self::Other(_) => None,
+            Self::Heap(_) => None,
         }
     }
 
@@ -2134,7 +2087,14 @@ impl Attr {
     pub fn static_string(&self) -> Option<StaticStrings> {
         match self {
             Self::Interned(id) => StaticStrings::from_string_id(*id),
-            Self::Other(_) => None,
+            Self::Heap(_) => None,
+        }
+    }
+
+    pub fn py_estimate_size(&self) -> usize {
+        match self {
+            Self::Interned(_) => 0,
+            Self::Heap(s) => s.capacity(),
         }
     }
 }
@@ -2241,6 +2201,8 @@ const EXTERNAL_FUTURE_ID_TAG: usize = 1usize << (usize::BITS - 11);
 const MODULE_FUNCTION_ID_TAG: usize = 1usize << (usize::BITS - 12);
 /// High-bit tag for interned LongInt `id()` values.
 const INTERN_LONG_INT_ID_TAG: usize = 1usize << (usize::BITS - 13);
+/// High-bit tag for Property value-based IDs.
+const PROPERTY_ID_TAG: usize = 1usize << (usize::BITS - 14);
 
 /// Masks for value-based ID tags (keep bits below the tag bit).
 const INT_ID_MASK: usize = INT_ID_TAG - 1;
@@ -2252,6 +2214,7 @@ const MARKER_ID_MASK: usize = MARKER_ID_TAG - 1;
 const EXTERNAL_FUTURE_ID_MASK: usize = EXTERNAL_FUTURE_ID_TAG - 1;
 const MODULE_FUNCTION_ID_MASK: usize = MODULE_FUNCTION_ID_TAG - 1;
 const INTERN_LONG_INT_ID_MASK: usize = INTERN_LONG_INT_ID_TAG - 1;
+const PROPERTY_ID_MASK: usize = PROPERTY_ID_TAG - 1;
 
 /// Enumerates singleton literal slots so we can issue stable `id()` values without heap allocation.
 #[repr(usize)]
@@ -2330,6 +2293,15 @@ fn ext_function_value_id(f_id: ExtFunctionId) -> usize {
 #[inline]
 fn marker_value_id(m: Marker) -> usize {
     MARKER_ID_TAG | ((m.0 as usize) & MARKER_ID_MASK)
+}
+
+/// Computes a deterministic ID for a property value based on its discriminant.
+#[inline]
+fn property_value_id(p: Property) -> usize {
+    let discriminant = match p {
+        Property::Os(os_fn) => os_fn as usize,
+    };
+    PROPERTY_ID_TAG | (discriminant & PROPERTY_ID_MASK)
 }
 
 /// Computes a deterministic ID for an external future based on its call ID.

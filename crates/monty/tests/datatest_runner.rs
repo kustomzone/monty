@@ -1,18 +1,23 @@
 use std::{
+    cell::RefCell,
+    collections::{HashMap, HashSet},
     error::Error,
     ffi::CString,
     fs,
     panic::{self, AssertUnwindSafe},
     path::Path,
-    sync::mpsc::{self, RecvTimeoutError},
+    sync::{
+        OnceLock,
+        mpsc::{self, RecvTimeoutError},
+    },
     thread,
     time::Duration,
 };
 
 use ahash::AHashMap;
 use monty::{
-    ExcType, ExternalResult, LimitedTracker, MontyException, MontyFuture, MontyObject, MontyRun, ResourceLimits,
-    RunProgress, StdPrint,
+    ExcType, ExternalResult, LimitedTracker, MontyException, MontyFuture, MontyObject, MontyRun, OsFunction,
+    ResourceLimits, RunProgress, StdPrint, dir_stat, file_stat,
 };
 use pyo3::{prelude::*, types::PyDict};
 use similar::TextDiff;
@@ -248,6 +253,36 @@ const ITER_EXT_FUNCTIONS: &[&str] = &[
 /// `scripts/run_traceback.py` to ensure consistency.
 const ITER_EXT_FUNCTIONS_PYTHON: &str = include_str!("../../../scripts/iter_test_methods.py");
 
+/// Pre-imports Python modules that can cause race conditions during parallel test execution.
+///
+/// Python's import machinery isn't fully thread-safe during module initialization.
+/// When multiple tests try to import modules like `typing` or `dataclasses` simultaneously,
+/// one thread may see a partially initialized module, causing `AttributeError`.
+///
+/// This function must be called once before any parallel test execution to ensure
+/// all relevant modules are fully initialized.
+fn ensure_python_modules_imported() {
+    static INIT: OnceLock<()> = OnceLock::new();
+    INIT.get_or_init(|| {
+        Python::attach(|py| {
+            // Import modules that are used by iter_test_methods.py and can cause race conditions.
+            // The order matters: import dependencies first.
+            py.import("typing").expect("Failed to import typing");
+            py.import("dataclasses").expect("Failed to import dataclasses");
+            py.import("pathlib").expect("Failed to import pathlib");
+            py.import("stat").expect("Failed to import stat");
+            py.import("asyncio").expect("Failed to import asyncio");
+            py.import("traceback").expect("Failed to import traceback");
+
+            // Also pre-execute the iter_test_methods code once to ensure all its
+            // module-level code (dataclass definitions, monkey-patches) is initialized
+            let ext_funcs_cstr = CString::new(ITER_EXT_FUNCTIONS_PYTHON).expect("Invalid C string");
+            py.run(&ext_funcs_cstr, None, None)
+                .expect("Failed to pre-initialize iter_test_methods");
+        });
+    });
+}
+
 /// Result from dispatching an external function call.
 ///
 /// Distinguishes between synchronous calls (return immediately) and
@@ -388,6 +423,521 @@ fn dispatch_external_call(name: &str, args: Vec<MontyObject>) -> DispatchResult 
     }
 }
 
+// =============================================================================
+// Virtual Filesystem for OS Call Tests
+// =============================================================================
+
+/// Virtual file entry for OS call tests (static VFS).
+struct StaticVirtualFile {
+    content: &'static [u8],
+    mode: i64,
+}
+
+/// Virtual file entry (owned, for unified VFS lookups).
+struct VirtualFile {
+    content: Vec<u8>,
+    mode: i64,
+}
+
+/// Virtual filesystem modification time (arbitrary fixed timestamp).
+const VFS_MTIME: f64 = 1_700_000_000.0;
+
+/// Virtual filesystem for testing Path methods.
+///
+/// Structure:
+/// ```text
+/// /virtual/
+/// ├── file.txt           (file, 644, "hello world\n")
+/// ├── data.bin           (file, 644, b"\x00\x01\x02\x03")
+/// ├── empty.txt          (file, 644, "")
+/// ├── subdir/
+/// │   ├── nested.txt     (file, 644, "nested content")
+/// │   └── deep/
+/// │       └── file.txt   (file, 644, "deep")
+/// └── readonly.txt       (file, 444, "readonly")
+///
+/// /nonexistent           (does not exist)
+/// ```
+fn get_static_virtual_file(path: &str) -> Option<StaticVirtualFile> {
+    match path {
+        "/virtual/file.txt" => Some(StaticVirtualFile {
+            content: b"hello world\n",
+            mode: 0o644,
+        }),
+        "/virtual/data.bin" => Some(StaticVirtualFile {
+            content: b"\x00\x01\x02\x03",
+            mode: 0o644,
+        }),
+        "/virtual/empty.txt" => Some(StaticVirtualFile {
+            content: b"",
+            mode: 0o644,
+        }),
+        "/virtual/subdir/nested.txt" => Some(StaticVirtualFile {
+            content: b"nested content",
+            mode: 0o644,
+        }),
+        "/virtual/subdir/deep/file.txt" => Some(StaticVirtualFile {
+            content: b"deep",
+            mode: 0o644,
+        }),
+        "/virtual/readonly.txt" => Some(StaticVirtualFile {
+            content: b"readonly",
+            mode: 0o444,
+        }),
+        _ => None,
+    }
+}
+
+/// Gets a virtual file, checking the mutable layer first, then falling back to static.
+fn get_virtual_file(path: &str) -> Option<VirtualFile> {
+    // Check mutable layer first
+    let mutable_result = MUTABLE_VFS.with(|vfs| {
+        let vfs = vfs.borrow();
+        // Check if deleted
+        if vfs.deleted_files.contains(path) {
+            return Some(None);
+        }
+        // Check if exists in mutable layer
+        if let Some((content, mode)) = vfs.files.get(path) {
+            return Some(Some(VirtualFile {
+                content: content.clone(),
+                mode: *mode,
+            }));
+        }
+        None
+    });
+
+    match mutable_result {
+        Some(Some(file)) => Some(file),
+        Some(None) => None, // File was deleted
+        None => {
+            // Fall back to static VFS
+            get_static_virtual_file(path).map(|f| VirtualFile {
+                content: f.content.to_vec(),
+                mode: f.mode,
+            })
+        }
+    }
+}
+
+// =============================================================================
+// Mutable VFS Layer (Thread-Local Storage for Write Operations)
+// =============================================================================
+
+/// Mutable state for the virtual filesystem, supporting write operations.
+///
+/// This layer sits on top of the static VFS and allows tests to create, modify, and
+/// delete files and directories. The state is thread-local so tests don't interfere
+/// with each other.
+#[derive(Default)]
+struct MutableVfs {
+    /// Files created or modified during test execution.
+    files: HashMap<String, (Vec<u8>, i64)>, // path -> (content, mode)
+    /// Directories created during test execution.
+    dirs: HashSet<String>,
+    /// Files deleted during test execution (shadows static VFS entries).
+    deleted_files: HashSet<String>,
+    /// Directories deleted during test execution.
+    deleted_dirs: HashSet<String>,
+}
+
+thread_local! {
+    /// Thread-local mutable VFS state.
+    static MUTABLE_VFS: RefCell<MutableVfs> = RefCell::new(MutableVfs::default());
+}
+
+/// Resets the mutable VFS state for a new test.
+fn reset_mutable_vfs() {
+    MUTABLE_VFS.with(|vfs| {
+        *vfs.borrow_mut() = MutableVfs::default();
+    });
+}
+
+/// Check if the given path is a directory in the virtual filesystem.
+fn is_virtual_dir(path: &str) -> bool {
+    // Check mutable layer first
+    let result = MUTABLE_VFS.with(|vfs| {
+        let vfs = vfs.borrow();
+        if vfs.deleted_dirs.contains(path) {
+            return Some(false);
+        }
+        if vfs.dirs.contains(path) {
+            return Some(true);
+        }
+        None
+    });
+    if let Some(is_dir) = result {
+        return is_dir;
+    }
+    // Fall back to static VFS
+    matches!(path, "/virtual" | "/virtual/subdir" | "/virtual/subdir/deep")
+}
+
+/// Get directory entries for a virtual directory.
+fn get_virtual_dir_entries(path: &str) -> Option<Vec<String>> {
+    // First check if the directory exists
+    if !is_virtual_dir(path) {
+        return None;
+    }
+
+    // Get static entries (if any)
+    let static_entries: Vec<&'static str> = match path {
+        "/virtual" => vec![
+            "/virtual/file.txt",
+            "/virtual/data.bin",
+            "/virtual/empty.txt",
+            "/virtual/subdir",
+            "/virtual/readonly.txt",
+        ],
+        "/virtual/subdir" => vec!["/virtual/subdir/nested.txt", "/virtual/subdir/deep"],
+        "/virtual/subdir/deep" => vec!["/virtual/subdir/deep/file.txt"],
+        _ => vec![],
+    };
+
+    // Combine with mutable layer
+    MUTABLE_VFS.with(|vfs| {
+        let vfs = vfs.borrow();
+        let mut entries: HashSet<String> = static_entries
+            .iter()
+            .filter(|e| {
+                let s: &str = e;
+                !vfs.deleted_files.contains(s) && !vfs.deleted_dirs.contains(s)
+            })
+            .map(|e| (*e).to_owned())
+            .collect();
+
+        // Add mutable files and dirs in this directory
+        let prefix = if path.ends_with('/') {
+            path.to_owned()
+        } else {
+            format!("{path}/")
+        };
+        for file_path in vfs.files.keys() {
+            if file_path.starts_with(&prefix) {
+                // Only include direct children (not nested)
+                let rest = &file_path[prefix.len()..];
+                if !rest.contains('/') {
+                    entries.insert(file_path.clone());
+                }
+            }
+        }
+        for dir_path in &vfs.dirs {
+            if dir_path.starts_with(&prefix) {
+                let rest = &dir_path[prefix.len()..];
+                if !rest.contains('/') {
+                    entries.insert(dir_path.clone());
+                }
+            }
+        }
+
+        Some(entries.into_iter().collect())
+    })
+}
+
+/// Helper to get a boolean kwarg by name.
+fn get_kwarg_bool(kwargs: &[(MontyObject, MontyObject)], name: &str) -> bool {
+    for (key, value) in kwargs {
+        if let MontyObject::String(key_str) = key
+            && key_str == name
+        {
+            return matches!(value, MontyObject::Bool(true));
+        }
+    }
+    false
+}
+
+/// Dispatches an OS function call using the virtual filesystem.
+///
+/// Returns an `ExternalResult` to pass back to the Monty interpreter.
+/// Raises `FileNotFoundError` for missing files/directories.
+#[expect(clippy::cast_possible_wrap)] // Virtual file sizes are tiny, no wrap possible
+fn dispatch_os_call(
+    function: OsFunction,
+    args: &[MontyObject],
+    kwargs: &[(MontyObject, MontyObject)],
+) -> ExternalResult {
+    // Handle GetEnviron first as it takes no path argument
+    if function == OsFunction::GetEnviron {
+        // Return the virtual environment as a dict
+        let env_dict = vec![
+            (
+                MontyObject::String("VIRTUAL_HOME".to_owned()),
+                MontyObject::String("/virtual/home".to_owned()),
+            ),
+            (
+                MontyObject::String("VIRTUAL_USER".to_owned()),
+                MontyObject::String("testuser".to_owned()),
+            ),
+            (
+                MontyObject::String("VIRTUAL_EMPTY".to_owned()),
+                MontyObject::String(String::new()),
+            ),
+        ];
+        return MontyObject::Dict(env_dict.into()).into();
+    }
+
+    // Extract path from MontyObject::Path (or String for backwards compatibility)
+    let path = match &args[0] {
+        MontyObject::Path(p) => p.clone(),
+        MontyObject::String(s) => s.clone(),
+        other => panic!("OS call: first arg must be path, got {other:?}"),
+    };
+
+    match function {
+        OsFunction::GetEnviron => unreachable!("handled above"),
+        OsFunction::Exists => {
+            let exists = get_virtual_file(&path).is_some() || is_virtual_dir(&path);
+            MontyObject::Bool(exists).into()
+        }
+        OsFunction::IsFile => {
+            let is_file = get_virtual_file(&path).is_some();
+            MontyObject::Bool(is_file).into()
+        }
+        OsFunction::IsDir => {
+            let is_dir = is_virtual_dir(&path);
+            MontyObject::Bool(is_dir).into()
+        }
+        OsFunction::IsSymlink => {
+            // Virtual filesystem doesn't have symlinks
+            MontyObject::Bool(false).into()
+        }
+        OsFunction::ReadText => {
+            if let Some(file) = get_virtual_file(&path) {
+                match std::str::from_utf8(&file.content) {
+                    Ok(text) => MontyObject::String(text.to_owned()).into(),
+                    Err(_) => MontyException::new(
+                        ExcType::UnicodeDecodeError,
+                        Some("'utf-8' codec can't decode bytes".to_owned()),
+                    )
+                    .into(),
+                }
+            } else {
+                MontyException::new(
+                    ExcType::FileNotFoundError,
+                    Some(format!("[Errno 2] No such file or directory: '{path}'")),
+                )
+                .into()
+            }
+        }
+        OsFunction::ReadBytes => {
+            if let Some(file) = get_virtual_file(&path) {
+                MontyObject::Bytes(file.content).into()
+            } else {
+                MontyException::new(
+                    ExcType::FileNotFoundError,
+                    Some(format!("[Errno 2] No such file or directory: '{path}'")),
+                )
+                .into()
+            }
+        }
+        OsFunction::Stat => {
+            if let Some(file) = get_virtual_file(&path) {
+                file_stat(file.mode, file.content.len() as i64, VFS_MTIME).into()
+            } else if is_virtual_dir(&path) {
+                dir_stat(0o755, VFS_MTIME).into()
+            } else {
+                MontyException::new(
+                    ExcType::FileNotFoundError,
+                    Some(format!("[Errno 2] No such file or directory: '{path}'")),
+                )
+                .into()
+            }
+        }
+        OsFunction::Iterdir => {
+            if let Some(entries) = get_virtual_dir_entries(&path) {
+                // Return Path objects, not strings
+                let list: Vec<MontyObject> = entries.into_iter().map(MontyObject::Path).collect();
+                MontyObject::List(list).into()
+            } else {
+                MontyException::new(
+                    ExcType::FileNotFoundError,
+                    Some(format!("[Errno 2] No such file or directory: '{path}'")),
+                )
+                .into()
+            }
+        }
+        OsFunction::Resolve | OsFunction::Absolute => {
+            // For virtual paths, return as-is (they're already absolute)
+            MontyObject::String(path).into()
+        }
+        OsFunction::Getenv => {
+            // Virtual environment for testing os.getenv()
+            // args[0] is key, args[1] is default (may be None)
+            let key = String::try_from(&args[0]).expect("getenv: first arg must be key string");
+            let default = &args[1];
+
+            // Provide a few test environment variables
+            let value = match key.as_str() {
+                "VIRTUAL_HOME" => Some("/virtual/home"),
+                "VIRTUAL_USER" => Some("testuser"),
+                "VIRTUAL_EMPTY" => Some(""),
+                _ => None,
+            };
+
+            if let Some(v) = value {
+                MontyObject::String(v.to_owned()).into()
+            } else if matches!(default, MontyObject::None) {
+                MontyObject::None.into()
+            } else {
+                // Return the default value
+                default.clone().into()
+            }
+        }
+        OsFunction::WriteText => {
+            // args[0] is path, args[1] is text content
+            let text = String::try_from(&args[1]).expect("write_text: second arg must be string");
+            MUTABLE_VFS.with(|vfs| {
+                let mut vfs = vfs.borrow_mut();
+                vfs.files.insert(path.clone(), (text.into_bytes(), 0o644));
+                vfs.deleted_files.remove(&path);
+            });
+            // write_text returns the number of bytes written
+            let byte_count = MUTABLE_VFS.with(|vfs| vfs.borrow().files.get(&path).map_or(0, |(c, _)| c.len()));
+            MontyObject::Int(byte_count as i64).into()
+        }
+        OsFunction::WriteBytes => {
+            // args[0] is path, args[1] is bytes content
+            let bytes = match &args[1] {
+                MontyObject::Bytes(b) => b.clone(),
+                other => panic!("write_bytes: second arg must be bytes, got {other:?}"),
+            };
+            let byte_count = bytes.len();
+            MUTABLE_VFS.with(|vfs| {
+                let mut vfs = vfs.borrow_mut();
+                vfs.files.insert(path.clone(), (bytes, 0o644));
+                vfs.deleted_files.remove(&path);
+            });
+            // write_bytes returns the number of bytes written
+            MontyObject::Int(byte_count as i64).into()
+        }
+        OsFunction::Mkdir => {
+            // Check for parents and exist_ok in kwargs (e.g., mkdir(parents=True, exist_ok=True))
+            let parents = get_kwarg_bool(kwargs, "parents");
+            let exist_ok = get_kwarg_bool(kwargs, "exist_ok");
+
+            // Check if already exists
+            if is_virtual_dir(&path) {
+                if exist_ok {
+                    return MontyObject::None.into();
+                }
+                return MontyException::new(ExcType::OSError, Some(format!("[Errno 17] File exists: '{path}'"))).into();
+            }
+
+            // Check parent directory
+            let parent = std::path::Path::new(&path)
+                .parent()
+                .map(|p| p.to_string_lossy().to_string())
+                .unwrap_or_default();
+            if !parent.is_empty() && !is_virtual_dir(&parent) {
+                if parents {
+                    // Create parent directories recursively
+                    create_parent_dirs(&parent);
+                } else {
+                    return MontyException::new(
+                        ExcType::FileNotFoundError,
+                        Some(format!("[Errno 2] No such file or directory: '{path}'")),
+                    )
+                    .into();
+                }
+            }
+
+            MUTABLE_VFS.with(|vfs| {
+                let mut vfs = vfs.borrow_mut();
+                vfs.deleted_dirs.remove(&path);
+                vfs.dirs.insert(path);
+            });
+            MontyObject::None.into()
+        }
+        OsFunction::Unlink => {
+            // args[0] is path
+            if get_virtual_file(&path).is_some() {
+                MUTABLE_VFS.with(|vfs| {
+                    let mut vfs = vfs.borrow_mut();
+                    vfs.files.remove(&path);
+                    vfs.deleted_files.insert(path);
+                });
+                MontyObject::None.into()
+            } else {
+                MontyException::new(
+                    ExcType::FileNotFoundError,
+                    Some(format!("[Errno 2] No such file or directory: '{path}'")),
+                )
+                .into()
+            }
+        }
+        OsFunction::Rmdir => {
+            // args[0] is path
+            if is_virtual_dir(&path) {
+                MUTABLE_VFS.with(|vfs| {
+                    let mut vfs = vfs.borrow_mut();
+                    vfs.dirs.remove(&path);
+                    vfs.deleted_dirs.insert(path);
+                });
+                MontyObject::None.into()
+            } else {
+                MontyException::new(
+                    ExcType::FileNotFoundError,
+                    Some(format!("[Errno 2] No such file or directory: '{path}'")),
+                )
+                .into()
+            }
+        }
+        OsFunction::Rename => {
+            // args[0] is src path, args[1] is dest path
+            let dest = match &args[1] {
+                MontyObject::Path(p) => p.clone(),
+                MontyObject::String(s) => s.clone(),
+                other => panic!("rename: second arg must be path, got {other:?}"),
+            };
+
+            if let Some(file) = get_virtual_file(&path) {
+                MUTABLE_VFS.with(|vfs| {
+                    let mut vfs = vfs.borrow_mut();
+                    // Remove from old location
+                    vfs.files.remove(&path);
+                    vfs.deleted_files.insert(path);
+                    // Add to new location
+                    vfs.files.insert(dest, (file.content, file.mode));
+                });
+                MontyObject::None.into()
+            } else if is_virtual_dir(&path) {
+                MUTABLE_VFS.with(|vfs| {
+                    let mut vfs = vfs.borrow_mut();
+                    vfs.dirs.remove(&path);
+                    vfs.deleted_dirs.insert(path);
+                    vfs.dirs.insert(dest);
+                });
+                MontyObject::None.into()
+            } else {
+                MontyException::new(
+                    ExcType::FileNotFoundError,
+                    Some(format!("[Errno 2] No such file or directory: '{path}'")),
+                )
+                .into()
+            }
+        }
+    }
+}
+
+/// Helper to create parent directories recursively.
+fn create_parent_dirs(path: &str) {
+    if is_virtual_dir(path) {
+        return;
+    }
+    // Create parent first
+    if let Some(parent) = std::path::Path::new(path).parent() {
+        let parent_str = parent.to_string_lossy().to_string();
+        if !parent_str.is_empty() {
+            create_parent_dirs(&parent_str);
+        }
+    }
+    // Create this directory
+    MUTABLE_VFS.with(|vfs| {
+        let mut vfs = vfs.borrow_mut();
+        vfs.dirs.insert(path.to_owned());
+    });
+}
+
 /// Represents a test failure with details about expected vs actual values.
 #[derive(Debug)]
 struct TestFailure {
@@ -418,6 +968,9 @@ impl std::fmt::Display for TestFailure {
 /// against the expected outcome specified in the fixture.
 fn try_run_test(path: &Path, code: &str, expectation: &Expectation) -> Result<(), TestFailure> {
     let test_name = path.strip_prefix("test_cases/").unwrap_or(path).display().to_string();
+
+    // Reset the mutable VFS for each test
+    reset_mutable_vfs();
 
     // Handle ref-count-return tests separately since they need run_ref_counts()
     #[cfg(feature = "ref-count-return")]
@@ -601,6 +1154,9 @@ fn try_run_test(path: &Path, code: &str, expectation: &Expectation) -> Result<()
 /// iterative executor API and providing implementations for predefined external functions.
 fn try_run_iter_test(path: &Path, code: &str, expectation: &Expectation) -> Result<(), TestFailure> {
     let test_name = path.strip_prefix("test_cases/").unwrap_or(path).display().to_string();
+
+    // Reset the mutable VFS for each test
+    reset_mutable_vfs();
 
     // Ref-counting tests not supported in iter mode
     #[cfg(feature = "ref-count-return")]
@@ -804,6 +1360,16 @@ fn run_iter_loop(exec: MontyRun) -> Result<MontyObject, MontyException> {
 
                 progress = state.resume(results, &mut StdPrint)?;
             }
+            RunProgress::OsCall {
+                function,
+                args,
+                kwargs,
+                state,
+                ..
+            } => {
+                let result = dispatch_os_call(function, &args, &kwargs);
+                progress = state.run(result, &mut StdPrint)?;
+            }
         }
     }
 }
@@ -998,6 +1564,10 @@ fn try_run_cpython_test(
     iter_mode: bool,
     async_mode: bool,
 ) -> Result<(), TestFailure> {
+    // Ensure Python modules are imported before parallel tests access them.
+    // This prevents race conditions during module initialization.
+    ensure_python_modules_imported();
+
     // Skip RefCounts tests - only relevant for Monty
     if matches!(expectation, Expectation::RefCounts(_)) {
         return Ok(());

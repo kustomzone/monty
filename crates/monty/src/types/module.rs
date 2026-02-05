@@ -6,8 +6,8 @@ use crate::{
     heap::{Heap, HeapId},
     intern::{Interns, StringId},
     resource::ResourceTracker,
-    types::{Dict, PyTrait},
-    value::{Attr, Value},
+    types::{AttrCallResult, Dict, PyTrait},
+    value::{EitherStr, Value},
 };
 
 /// A Python module with a name and attribute dictionary.
@@ -97,20 +97,44 @@ impl Module {
         self.attrs.py_dec_ref_ids(stack);
     }
 
+    /// Gets an attribute by string ID for the `py_getattr` trait method.
+    ///
+    /// Returns the attribute value if found, or `None` if the attribute doesn't exist.
+    /// For `Property` values, invokes the property getter rather than returning
+    /// the Property itself - this implements Python's descriptor protocol.
+    pub fn py_getattr(
+        &self,
+        attr_id: StringId,
+        heap: &mut Heap<impl ResourceTracker>,
+        interns: &Interns,
+    ) -> Option<AttrCallResult> {
+        let value = self.attrs.get_by_str(interns.get_str(attr_id), heap, interns)?;
+
+        // If the value is a Property, invoke its getter to compute the actual value
+        if let Value::Property(prop) = *value {
+            Some(prop.get())
+        } else {
+            Some(AttrCallResult::Value(value.clone_with_heap(heap)))
+        }
+    }
+
     /// Calls an attribute as a function on this module.
     ///
     /// Modules don't have methods - they have callable attributes. This looks up
     /// the attribute and calls it if it's a `ModuleFunction`.
-    pub fn py_call_attr(
+    ///
+    /// Returns `AttrCallResult` because module functions may need OS operations
+    /// (e.g., `os.getenv()`) that require host involvement.
+    pub fn py_call_attr_raw(
         &self,
         heap: &mut Heap<impl ResourceTracker>,
-        attr: &Attr,
+        attr: &EitherStr,
         args: ArgValues,
         interns: &Interns,
-    ) -> RunResult<Value> {
+    ) -> RunResult<AttrCallResult> {
         let attr_key = match attr {
-            Attr::Interned(id) => Value::InternString(*id),
-            Attr::Other(s) => {
+            EitherStr::Interned(id) => Value::InternString(*id),
+            EitherStr::Heap(s) => {
                 // Module attributes are always interned, so owned strings won't match
                 args.drop_with_heap(heap);
                 return Err(ExcType::attribute_error_module(interns.get_str(self.name), s));

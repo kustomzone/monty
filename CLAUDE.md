@@ -14,6 +14,29 @@ Project goals:
 - **Snapshotting and iteration**: Plan is to allow code to be iteratively executed and snapshotted at each function call
 - Targets the latest stable version of Python, currently Python 3.14
 
+## Important Security Notice
+
+It's ABSOLUTELY CRITICAL that there's no way for code run in a Monty sandbox to access the host filesystem, or environment or to in any way "escape the sandbox".
+
+**Monty will be used to run untrusted, potentially malicious code.**
+
+Make sure there's no risk of this, either in the implementation, or in the public API that makes it more like that a developer using the pydantic_monty package might make such a mistake.
+
+Possible security risks to consider:
+* filesystem access
+* path traversal to access files the users did not intend to expose to the monty sandbox
+* memory errors - use of unsafe memory operations
+* excessive memory usage - evading monty's resource limits
+* infinite loops - evading monty's resource limits
+* network access - sockets, HTTP requests
+* subprocess/shell execution - os.system, subprocess, etc.
+* import system abuse - importing modules with side effects or accessing `__import__`
+* external function/callback misuse - callbacks run in host environment
+* deserialization attacks - loading untrusted serialized Monty/snapshot data
+* regex/string DoS - catastrophic backtracking or operations bypassing limits
+* information leakage via timing or error messages
+* Python/Javascript/Rust APIs that accidentally allow developers to expose their host to monty code
+
 ## Bytecode VM Architecture
 
 Monty is implemented as a bytecode VM, same as CPython.
@@ -83,6 +106,10 @@ make help                 Show this help (usage: make help)
 
 Use the /python-playground skill to check cpython and monty behavior.
 
+## Releasing
+
+See [RELEASING.md](RELEASING.md) for the release process.
+
 ## Exception
 
 It's important that exceptions raised/returned by this library match those raised by Python.
@@ -118,13 +145,17 @@ explain what it does and why and any considerations or potential foot-guns of us
 
 The only exception is trait implementation methods where a docstring is not necessary if the method is self-explanatory.
 
+It's important that docstrings cover the motivation and primary usage patterns of code, not just the simple "what it does".
+
+Similarly, you should add comments to code, especially if the code is complex or esoteric.
+
 Only add examples to docstrings of public functions and structs, examples should be <=8 lines, if the example is more, remove it.
 
 If you add example code to docstrings, it must be run in tests. NEVER add examples that are ignored.
 
-Similarly, you should add lots of comments to code.
+If you encounter a comment or docstring that's out of date - you MUST update it to be correct.
 
-If you see a comment or docstring that's out of date - you MUST update it to be correct.
+Similarly, if you encounter code that has no docstrings or comments, or they are minimal, you should add more detail.
 
 NOTE: COMMENTS AND DOCSTRINGS ARE EXTREMELY IMPORTANT TO THE LONG TERM HEALTH OF THE PROJECT.
 
@@ -329,6 +360,9 @@ Use `@pytest.mark.parametrize` whenever testing multiple similar cases.
 
 Use `snapshot` from `inline-snapshot` for all test asserts.
 
+NEVER do the lazy `assert '...' in ...` instead always do `assert value == snapshot()`,
+then run the test and inline-snapshot will fill in the missing value in the `snapshot()` call.
+
 Use `pytest.raises` for expected exceptions, like this
 
 ```py
@@ -382,16 +416,29 @@ The JavaScript package provides Node.js bindings for the Monty interpreter via n
 
 ### Current API
 
-The package currently exposes a single function:
+The package exposes:
+
+- `Monty` class - Parse and execute Python code with inputs, external functions, and resource limits
+- `MontySnapshot` / `MontyComplete` - For iterative execution with `start()` / `resume()`
+- `runMontyAsync()` - Helper for async external functions
+- `MontySyntaxError` / `MontyRuntimeError` / `MontyTypingError` - Error classes
 
 ```ts
-function run(code: string): RunResult
+import { Monty, MontySnapshot, runMontyAsync } from '@pydantic/monty'
 
-interface RunResult {
-  output: string  // Captured print() output
-  result: string  // Debug representation of final value
+// Basic execution
+const m = new Monty('x + 1', { inputs: ['x'] })
+const result = m.run({ inputs: { x: 10 } }) // returns 11
+
+// Iterative execution for external functions
+const m2 = new Monty('fetch(url)', { inputs: ['url'], externalFunctions: ['fetch'] })
+let progress = m2.start({ inputs: { url: 'https://...' } })
+if (progress instanceof MontySnapshot) {
+  progress = progress.resume({ returnValue: 'response data' })
 }
 ```
+
+See `crates/monty-js/README.md` for full API documentation.
 
 ### Building and Testing
 
@@ -428,14 +475,4 @@ npm test
 
 - Tests use [ava](https://github.com/avajs/ava) and live in `crates/monty-js/__test__/`
 - Tests are written in TypeScript
-- Follow the existing test style in `index.spec.ts`
-
-### Future Work
-
-The JS bindings currently only expose a simple `run()` function. Future work may expose:
-- Input variables
-- Resource limits
-- External functions
-- Snapshot/resume (iterative execution)
-
-These features mirror the Python package API and are implemented in the Rust core.
+- Follow the existing test style in the `__test__/` directory

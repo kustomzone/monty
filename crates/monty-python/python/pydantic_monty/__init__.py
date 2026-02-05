@@ -18,8 +18,15 @@ from ._monty import (
     MontyTypingError,
     __version__,
 )
+from .os_access import AbstractFile, AbstractOS, CallbackFile, MemoryFile, OSAccess, OsFunction, StatResult
 
 __all__ = (
+    # this file
+    'run_monty_async',
+    'ExternalResult',
+    'ResourceLimits',
+    # _monty
+    '__version__',
     'Monty',
     'MontyComplete',
     'MontySnapshot',
@@ -29,10 +36,14 @@ __all__ = (
     'MontyRuntimeError',
     'MontyTypingError',
     'Frame',
-    '__version__',
-    'run_monty_async',
-    'ResourceLimits',
-    'ExternalResult',
+    # os_access
+    'StatResult',
+    'OsFunction',
+    'AbstractOS',
+    'AbstractFile',
+    'MemoryFile',
+    'CallbackFile',
+    'OSAccess',
 )
 T = TypeVar('T')
 

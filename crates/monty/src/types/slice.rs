@@ -11,9 +11,9 @@ use crate::{
     args::ArgValues,
     exception_private::{ExcType, RunResult},
     heap::{Heap, HeapData, HeapId},
-    intern::Interns,
+    intern::{Interns, StaticStrings, StringId},
     resource::ResourceTracker,
-    types::{PyTrait, Type},
+    types::{AttrCallResult, PyTrait, Type},
     value::Value,
 };
 
@@ -241,6 +241,21 @@ impl PyTrait for Slice {
 
     fn py_dec_ref_ids(&mut self, _stack: &mut Vec<HeapId>) {
         // Slice doesn't contain heap references, nothing to do
+    }
+
+    fn py_getattr(
+        &self,
+        attr_id: StringId,
+        _heap: &mut Heap<impl ResourceTracker>,
+        _interns: &Interns,
+    ) -> RunResult<Option<AttrCallResult>> {
+        // Slice attributes are computed values (Int or None), return Cow::Owned
+        match StaticStrings::from_string_id(attr_id) {
+            Some(StaticStrings::Start) => Ok(Some(AttrCallResult::Value(option_i64_to_value(self.start)))),
+            Some(StaticStrings::Stop) => Ok(Some(AttrCallResult::Value(option_i64_to_value(self.stop)))),
+            Some(StaticStrings::Step) => Ok(Some(AttrCallResult::Value(option_i64_to_value(self.step)))),
+            _ => Ok(None),
+        }
     }
 }
 

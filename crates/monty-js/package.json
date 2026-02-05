@@ -1,6 +1,6 @@
 {
   "name": "@pydantic/monty",
-  "version": "1.0.0",
+  "version": "0.0.3",
   "type": "module",
   "description": "Sandboxed Python interpreter for JavaScript/TypeScript",
   "main": "wrapper.js",
@@ -13,7 +13,7 @@
   },
   "repository": {
     "type": "git",
-    "url": "github.com/pydantic/monty"
+    "url": "https://github.com/pydantic/monty"
   },
   "license": "MIT",
   "browser": "browser.js",
