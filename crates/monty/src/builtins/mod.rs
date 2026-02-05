@@ -236,7 +236,7 @@ impl BuiltinsFunctions {
             Self::Chr => chr::builtin_chr(heap, args),
             Self::Divmod => divmod::builtin_divmod(heap, args),
             Self::Enumerate => enumerate::builtin_enumerate(heap, args, interns),
-            Self::Filter => filter::builtin_filter(heap, args, interns),
+            Self::Filter => filter::builtin_filter(heap, args, interns, print_writer),
             Self::Hash => hash::builtin_hash(heap, args, interns),
             Self::Hex => hex::builtin_hex(heap, args),
             Self::Id => id::builtin_id(heap, args),
