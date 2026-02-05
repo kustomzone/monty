@@ -1745,9 +1745,8 @@ impl<T: ResourceTracker> DropWithHeap<T> for vec::IntoIter<Value> {
 
 /// Guard that contains a `Value` and drops it from the heap when dropped.
 pub(crate) struct HeapGuard<'a, T: ResourceTracker, H: ContainsHeap<T>, V: DropWithHeap<T>> {
-    // uninitialized only during Drop implementation
-    value: MaybeUninit<V>,
-    heap: &'a mut H,
+    // empty only during Drop after `.take()`, so will unwrap everywhere else
+    inner: Option<(V, &'a mut H)>,
     _tracker: std::marker::PhantomData<T>,
 }
 
@@ -1756,55 +1755,50 @@ impl<'a, T: ResourceTracker, H: ContainsHeap<T>, V: DropWithHeap<T>> HeapGuard<'
     #[inline]
     pub fn new(value: V, heap: &'a mut H) -> Self {
         Self {
-            value: MaybeUninit::new(value),
-            heap,
+            inner: Some((value, heap)),
             _tracker: std::marker::PhantomData,
         }
     }
 
     /// Consumes the guard and returns the contained value without dropping it.
     #[inline]
-    pub fn into_inner(self) -> V {
-        let this = ManuallyDrop::new(self);
-        // SAFETY: value is initialized except during Drop, which `ManuallyDrop` prevents
-        unsafe { this.value.as_ptr().read() }
+    pub fn into_inner(mut self) -> V {
+        self.inner.take().unwrap().0
     }
 
     /// Borrows the guard as its constituent parts
     #[inline]
     pub fn as_parts(&mut self) -> (&V, &mut H) {
-        // SAFETY: value is initialized except during Drop, which is not happening here
-        let value = unsafe { self.value.assume_init_mut() };
-        (value, self.heap)
+        let (value, heap) = self.inner.as_mut().unwrap();
+        (value, *heap)
     }
 
     /// Borrows the guard as its constituent parts
     #[inline]
     pub fn as_parts_mut(&mut self) -> (&mut V, &mut H) {
-        // SAFETY: value is initialized except during Drop, which is not happening here
-        let value = unsafe { self.value.assume_init_mut() };
-        (value, self.heap)
+        let (value, heap) = self.inner.as_mut().unwrap();
+        (value, *heap)
     }
 
     /// Consumes the guard and returns the parts, so that the can be used separately
     #[inline]
-    pub fn into_parts(self) -> (V, &'a mut H) {
-        let this = ManuallyDrop::new(self);
-        // SAFETY: `ManuallyDrop` prevents `Drop` on self, so we can recover the parts
-        unsafe { (this.value.as_ptr().read(), addr_of!(this.heap).read()) }
+    pub fn into_parts(mut self) -> (V, &'a mut H) {
+        self.inner.take().unwrap()
     }
 
     /// Borrows just the heap out of the guard
     #[inline]
     pub fn heap(&mut self) -> &mut H {
-        self.heap
+        self.inner.as_mut().unwrap().1
     }
 }
 
 impl<T: ResourceTracker, H: ContainsHeap<T>, V: DropWithHeap<T>> Drop for HeapGuard<'_, T, H, V> {
+    #[inline]
     fn drop(&mut self) {
-        // SAFETY: value is initialized until this read
-        unsafe { self.value.as_ptr().read() }.drop_with_heap(self.heap.heap_mut());
+        if let Some((value, heap)) = self.inner.take() {
+            value.drop_with_heap(heap.heap_mut());
+        }
     }
 }
 
